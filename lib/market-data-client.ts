@@ -9,11 +9,10 @@ import { DATA_SOURCE_EXCHANGES, STAKE_CURRENCY } from "@/lib/hetzner";
 // by the classic VM-side download-data fallback (lib/hetzner.ts) when
 // that cache isn't usable for a given bot.
 //
-// Mirrors lib/ccxt-client.ts's CCXT_ID_OVERRIDES — "gate" is the one
-// mismatch between this platform's exchange ids and ccxt's own.
-const CCXT_ID_OVERRIDES: Record<string, string> = {
-  gate: "gateio",
-};
+// Mirrors lib/ccxt-client.ts's CCXT_ID_OVERRIDES — empty today since our
+// exchange ids (including "gate") already match ccxt's own exported class
+// names; kept as an explicit table for any future real mismatch.
+const CCXT_ID_OVERRIDES: Record<string, string> = {};
 
 function resolveCcxtId(exchangeName: string): string {
   return CCXT_ID_OVERRIDES[exchangeName] ?? exchangeName;

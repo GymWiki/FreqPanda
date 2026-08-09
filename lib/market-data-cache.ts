@@ -11,7 +11,12 @@ import { STRATEGY_PRESETS } from "@/lib/strategy-presets";
 // Background Fetch) browser download, both of which turned out unreliable
 // (Vercel/browser limits, exchange rate limits mid-download, huge auto-select
 // pairlists). POST /api/data/refresh (cron-job.org, once daily) calls
-// refreshMarketDataCache() below; lib/train-cloud.ts calls
+// planRefreshTasks() + refreshMarketDataCacheChunk() below — split into two
+// so the route can respond immediately after planning (fast) and defer the
+// actual per-task work (potentially much slower than any HTTP request
+// should block on) to a waitUntil-deferred continuation, time-boxed to fit
+// this invocation's own function timeout — see that route's own doc
+// comment for the full reasoning. lib/train-cloud.ts calls
 // resolveCachedTrainingData() at job-start to hand a training VM
 // already-cached data via signed Storage URLs (see preloadedData in
 // lib/hetzner.ts) instead of downloading anything itself. A stale/missing
@@ -114,9 +119,9 @@ interface RefreshOneResult {
 // One pair/timeframe: incremental if already cached (only fetches candles
 // since the last cached one), full backfill otherwise. Every failure is
 // caught and reported per-item rather than thrown — see
-// refreshMarketDataCache's own doc comment for why one bad pair (a
+// refreshMarketDataCacheChunk's own doc comment for why one bad pair (a
 // temporary exchange rate-limit, a delisted pair, ...) must never sink the
-// whole daily refresh.
+// whole refresh run.
 //
 // Writes one partition file per UTC day the newly-fetched candles land on.
 // Only the FIRST day of that span might already have a same-day partition
@@ -213,40 +218,80 @@ async function refreshOne(
   }
 }
 
-export interface RefreshSummary {
+export interface RefreshTask {
+  pair: string;
+  timeframe: string;
+}
+
+export interface RefreshPlan {
   exchange: string;
   pairs: string[];
   timeframes: string[];
-  updated: number;
-  skipped: number;
-  failed: number;
-  errors: Array<{ pair: string; timeframe: string; error: string }>;
+  tasks: RefreshTask[];
 }
 
-// Refreshes the shared cache for the current top-N-by-volume pairlist (the
-// same set an auto-select bot's VolumePairList would use — see
-// AUTO_PAIRLIST_SIZE's own doc comment in lib/hetzner.ts) plus
-// DEFAULT_CORR_PAIRLIST's correlation-only pair, across every cached
-// timeframe. Bounded concurrency (same reasoning the old client-side
-// downloader used): don't open dozens of simultaneous exchange calls at
-// once. Never throws for a single pair/timeframe failure — see refreshOne.
-export async function refreshMarketDataCache(): Promise<RefreshSummary> {
-  const supabase = serviceRoleClient();
+// Resolves the current top-N-by-volume pairlist (the same set an
+// auto-select bot's VolumePairList would use — see AUTO_PAIRLIST_SIZE's
+// own doc comment in lib/hetzner.ts) plus DEFAULT_CORR_PAIRLIST's
+// correlation-only pair, across every cached timeframe, into the flat task
+// queue refreshMarketDataCacheChunk works through. Deliberately fast (one
+// ccxt loadMarkets+fetchTickers call, no per-task work) — this is the part
+// POST /api/data/refresh does synchronously, before responding, so the
+// response can report an accurate tasksQueued count.
+export async function planRefreshTasks(): Promise<RefreshPlan> {
   const { data: topPairs } = await fetchTopVolumeStakePairs(AUTO_PAIRLIST_SIZE);
   const pairs = Array.from(new Set([...topPairs, ...DEFAULT_CORR_PAIRLIST]));
 
-  const tasks: Array<{ pair: string; timeframe: string }> = [];
+  const tasks: RefreshTask[] = [];
   for (const pair of pairs) {
     for (const timeframe of CACHED_TIMEFRAMES) {
       tasks.push({ pair, timeframe });
     }
   }
 
+  return { exchange: DATA_SOURCE_EXCHANGE, pairs, timeframes: CACHED_TIMEFRAMES, tasks };
+}
+
+export interface RefreshChunkSummary {
+  tasksTotal: number;
+  tasksProcessed: number;
+  tasksRemaining: number;
+  updated: number;
+  skipped: number;
+  failed: number;
+  errors: Array<{ pair: string; timeframe: string; error: string }>;
+  /** True if this chunk stopped because deadlineMs was reached, not because the queue ran out. */
+  timedOut: boolean;
+}
+
+// Works through `tasks` with bounded concurrency (same reasoning the old
+// client-side downloader used: don't open dozens of simultaneous exchange
+// calls at once) until either the queue is empty or deadlineMs is reached
+// — whichever comes first. Called via waitUntil from
+// POST /api/data/refresh, i.e. AFTER that route has already responded, so
+// there's no HTTP caller left waiting on this; deadlineMs only exists to
+// keep this invocation itself from running past Vercel's own function
+// timeout. Never throws for a single pair/timeframe failure — see
+// refreshOne — and a task queue that's too big to finish before the
+// deadline just leaves the untouched tasks' MarketDataCache rows exactly
+// as they were (still null, for a fresh backfill), which the NEXT
+// invocation of this same route picks up as its own tasks — see that
+// route's own doc comment for why this makes the whole thing safely
+// resumable across multiple daily/manual triggers rather than needing to
+// finish in one shot.
+export async function refreshMarketDataCacheChunk(tasks: RefreshTask[], deadlineMs: number): Promise<RefreshChunkSummary> {
+  const supabase = serviceRoleClient();
   const results: RefreshOneResult[] = [];
   const CONCURRENCY = 4;
   let nextIndex = 0;
+  let timedOut = false;
+
   async function worker() {
     for (;;) {
+      if (Date.now() >= deadlineMs) {
+        timedOut = nextIndex < tasks.length;
+        return;
+      }
       const index = nextIndex++;
       if (index >= tasks.length) return;
       results.push(await refreshOne(supabase, tasks[index].pair, tasks[index].timeframe));
@@ -255,15 +300,16 @@ export async function refreshMarketDataCache(): Promise<RefreshSummary> {
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, tasks.length) }, worker));
 
   return {
-    exchange: DATA_SOURCE_EXCHANGE,
-    pairs,
-    timeframes: CACHED_TIMEFRAMES,
+    tasksTotal: tasks.length,
+    tasksProcessed: results.length,
+    tasksRemaining: tasks.length - results.length,
     updated: results.filter((r) => r.status === "updated").length,
     skipped: results.filter((r) => r.status === "skipped").length,
     failed: results.filter((r) => r.status === "error").length,
     errors: results
       .filter((r): r is RefreshOneResult & { error: string } => r.status === "error" && !!r.error)
       .map((r) => ({ pair: r.pair, timeframe: r.timeframe, error: r.error })),
+    timedOut,
   };
 }
 

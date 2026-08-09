@@ -1,12 +1,12 @@
 import ccxt, { type Exchange, type Balances } from "ccxt";
 
 // Our exchange ids (see lib/exchange-presets.ts) match ccxt's own exchange
-// ids almost everywhere — "gate" is the one mismatch (ccxt calls it
-// "gateio"). Falls back to the id itself for every other exchange rather
-// than requiring a full 1:1 table that would just drift out of sync.
-const CCXT_ID_OVERRIDES: Record<string, string> = {
-  gate: "gateio",
-};
+// ids everywhere we use — including "gate" (ccxt's own exported class is
+// already named "gate", not "gateio"). Kept as an explicit table (even
+// though it's empty today) so a future real mismatch has an obvious place
+// to go, rather than requiring a full 1:1 table that would just drift out
+// of sync.
+const CCXT_ID_OVERRIDES: Record<string, string> = {};
 
 function resolveCcxtId(exchangeName: string): string {
   return CCXT_ID_OVERRIDES[exchangeName] ?? exchangeName;
