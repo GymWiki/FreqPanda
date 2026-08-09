@@ -470,6 +470,40 @@ function buildPairlistConfig(autoSelectCoins: boolean, pairWhitelist: string[]):
   };
 }
 
+// Every config.json this app generates — live deploy AND training/
+// backtesting — needs entry_pricing/exit_pricing: freqtrade's
+// Exchange.validate_config (freqtrade/exchange/exchange.py) does a raw
+// `config["exit_pricing"]` / `config["entry_pricing"]` dict subscript
+// unconditionally in its own __init__, for every runmode (live, dry-run,
+// AND backtesting — which is how FreqAI training actually runs, see
+// buildFreqAITrainingArtifacts's own doc comment). Unlike most other
+// config keys, these two have no schema-level default that freqtrade could
+// silently fill in for a missing key (only their own nested `price_side`
+// sub-field does) — omitting them entirely is a bare KeyError, not a
+// graceful validation error. `price_side: "same"` + `use_order_book: true`
+// matches freqtrade's own documented example config; order_book_top: 1
+// reads the best bid/ask, which is the correct behavior for `use_order_book:
+// true` — see validate_pricing's own check that the exchange supports
+// fetchL2OrderBook (both OKX and Gate.io, this app's DATA_SOURCE_EXCHANGE(S),
+// do).
+const PRICE_DISCOVERY_CONFIG = {
+  entry_pricing: { price_side: "same", use_order_book: true, order_book_top: 1 },
+  exit_pricing: { price_side: "same", use_order_book: true, order_book_top: 1 },
+};
+
+// freqtrade's config_schema.py (SCHEMA_TRADE_REQUIRED and
+// SCHEMA_BACKTEST_REQUIRED_FINAL — the latter applies to `backtesting`,
+// which is how FreqAI training runs) both list max_open_trades as a
+// required top-level config key, and — unlike stoploss/minimal_roi/
+// timeframe, which freqtrade's StrategyResolver copies out of the
+// strategy class into config before validation — it has no strategy-level
+// equivalent in this app's generated Python (see lib/strategy-presets.ts)
+// and no schema default, so it has to be set explicitly in every config
+// this app generates. Shared so training/backtesting emulates the same
+// concurrency the live/paper deploy actually runs with, rather than the
+// two silently drifting apart.
+const DEFAULT_MAX_OPEN_TRADES = 5;
+
 interface CloudInitParams {
   botName: string;
   /**
@@ -580,7 +614,7 @@ export function buildFreqtradeCloudInit(params: CloudInitParams): string {
   const effectiveExchangeName = exchangeName ?? DATA_SOURCE_EXCHANGE;
 
   const freqtradeConfig = {
-    max_open_trades: 5,
+    max_open_trades: DEFAULT_MAX_OPEN_TRADES,
     stake_currency: STAKE_CURRENCY,
     // "unlimited" hands sizing entirely to custom_stake_amount in the
     // strategy code, which reads total_budget/max_stake_pct back out of
@@ -598,6 +632,7 @@ export function buildFreqtradeCloudInit(params: CloudInitParams): string {
     dry_run_wallet: totalBudget,
     cancel_open_orders_on_exit: false,
     trading_mode: "spot",
+    ...PRICE_DISCOVERY_CONFIG,
     // Not read by freqtrade core — this is how the strategy's
     // custom_stake_amount (see lib/strategy-presets.ts) gets the user's
     // budget, per-trade risk ceiling, and snowball preference out of
@@ -919,6 +954,7 @@ export function buildFreqAITrainingArtifacts(params: TrainingCloudInitParams): T
   const { timerangeString: timerange } = computeTrainingTimerange(freqaiConfig, timerangeDays);
 
   const trainingConfig = {
+    max_open_trades: DEFAULT_MAX_OPEN_TRADES,
     stake_currency: STAKE_CURRENCY,
     stake_amount: "unlimited",
     // Same fee simulation value as the live deploy — FreqAI training runs
@@ -936,6 +972,7 @@ export function buildFreqAITrainingArtifacts(params: TrainingCloudInitParams): T
       auto_compound: autoCompound,
     },
     trading_mode: "spot",
+    ...PRICE_DISCOVERY_CONFIG,
     exchange: {
       // Starting value only — the training script itself rewrites this
       // in-place (via jq) before each download-data attempt, cycling
