@@ -114,7 +114,41 @@ interface RefreshOneResult {
   status: "updated" | "skipped" | "error";
   newCandleCount?: number;
   error?: string;
+  /** True if this call stopped because it hit its own per-task time slice (PER_TASK_TIME_BUDGET_MS), not because it actually caught up to now — purely for observability in the chunk summary's log line. */
+  partial?: boolean;
 }
+
+// Fisher-Yates, in place. Used by planRefreshTasks so the task queue isn't
+// the same pair-major, volume-sorted order on every single invocation — see
+// that function's own doc comment for why a fixed order starved every pair
+// past whichever few sat at the front.
+function shuffleInPlace<T>(items: T[]): T[] {
+  for (let i = items.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [items[i], items[j]] = [items[j], items[i]];
+  }
+  return items;
+}
+
+// Hard cap on how long a single refreshOne call is allowed to keep paging
+// before yielding, regardless of how far it's gotten. Found necessary the
+// hard way: fixing the pagination early-exit bug (see this function's own
+// doc comment below) meant a single severely-stale pair/timeframe (~10
+// months behind) could legitimately need hundreds of sequential exchange
+// calls to fully catch up — and since refreshMarketDataCacheChunk's own
+// deadline is only checked BETWEEN tasks, that one task would run
+// unbounded and consume the ENTIRE remaining chunk budget by itself.
+// Confirmed in production logs: three consecutive /api/data/refresh
+// invocations each hit Vercel's hard 300s platform timeout mid-task,
+// having only ever advanced whichever pairs happened to sit first in the
+// (always identically volume-sorted) queue — every pair after them got
+// literally zero attention, run after run, no matter how many times the
+// job fired. Capping each task's own turn means every task in the queue
+// gets a fair, bounded slice each run — a severely-stale pair now makes
+// partial-but-durable progress (see flushDay's per-day writes) across
+// several runs instead of either finishing completely or never starting
+// at all.
+const PER_TASK_TIME_BUDGET_MS = 25_000;
 
 // Safety bound on how many fetchOhlcvPage calls a single refreshOne
 // invocation will make — NOT a normal operating limit (see the pagination
@@ -172,6 +206,7 @@ async function refreshOne(
   supabase: ReturnType<typeof serviceRoleClient>,
   pair: string,
   timeframe: string,
+  taskDeadlineMs: number,
 ): Promise<RefreshOneResult> {
   try {
     const existing = await prisma.marketDataCache.findUnique({
@@ -227,7 +262,19 @@ async function refreshOne(
     }
 
     let cursor = sinceMs;
+    let ranOutOfTime = false;
     for (let page = 0; page < MAX_PAGES_PER_CALL; page++) {
+      // Checked at the top of every page fetch, not just once — this is
+      // what actually bounds this call's real-world duration to
+      // PER_TASK_TIME_BUDGET_MS (or less, if the outer chunk deadline is
+      // sooner — see refreshMarketDataCacheChunk). Whatever's already been
+      // flushed stays durably written; the next invocation's sinceMs
+      // picks up exactly where this one left off.
+      if (Date.now() >= taskDeadlineMs) {
+        ranOutOfTime = true;
+        break;
+      }
+
       const { data } = await fetchOhlcvPage(pair, timeframe, cursor, KLINES_PAGE_LIMIT);
       const candles = data.candles;
       if (!candles || candles.length === 0) break; // genuinely no more data — a real end, not just a short page
@@ -259,7 +306,7 @@ async function refreshOne(
     if (totalNewCandles === 0) {
       return { pair, timeframe, status: "skipped" };
     }
-    return { pair, timeframe, status: "updated", newCandleCount: totalNewCandles };
+    return { pair, timeframe, status: "updated", newCandleCount: totalNewCandles, partial: ranOutOfTime };
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     console.error(`[market-data-cache] refresh failed for ${pair} ${timeframe}:`, err);
@@ -287,6 +334,18 @@ export interface RefreshPlan {
 // ccxt loadMarkets+fetchTickers call, no per-task work) — this is the part
 // POST /api/data/refresh does synchronously, before responding, so the
 // response can report an accurate tasksQueued count.
+//
+// The task list is shuffled before returning — pairs (from
+// fetchTopVolumeStakePairs) are inherently volume-sorted, and building
+// tasks pair-major off that order means BTC/ETH-and-friends would sit
+// first in EVERY invocation's queue. Combined with PER_TASK_TIME_BUDGET_MS
+// not existing at all originally, that meant the highest-volume pairs
+// alone could consume an entire chunk's time budget while every pair
+// after them got zero attention, run after run — confirmed directly in
+// production logs. A random order each run, together with the per-task
+// time cap in refreshOne, means every pair gets a real chance to reach
+// the front of the queue across successive runs instead of a fixed few
+// permanently hogging it.
 export async function planRefreshTasks(): Promise<RefreshPlan> {
   const { data: topPairs } = await fetchTopVolumeStakePairs(AUTO_PAIRLIST_SIZE);
   const pairs = Array.from(new Set([...topPairs, ...DEFAULT_CORR_PAIRLIST]));
@@ -297,6 +356,7 @@ export async function planRefreshTasks(): Promise<RefreshPlan> {
       tasks.push({ pair, timeframe });
     }
   }
+  shuffleInPlace(tasks);
 
   return { exchange: DATA_SOURCE_EXCHANGE, pairs, timeframes: CACHED_TIMEFRAMES, tasks };
 }
@@ -306,6 +366,8 @@ export interface RefreshChunkSummary {
   tasksProcessed: number;
   tasksRemaining: number;
   updated: number;
+  /** Of the "updated" tasks, how many hit PER_TASK_TIME_BUDGET_MS rather than genuinely catching up — a high number here means the cache is still working through a large backlog, not an error. */
+  partial: number;
   skipped: number;
   failed: number;
   errors: Array<{ pair: string; timeframe: string; error: string }>;
@@ -313,25 +375,31 @@ export interface RefreshChunkSummary {
   timedOut: boolean;
 }
 
-// Works through `tasks` with bounded concurrency (same reasoning the old
-// client-side downloader used: don't open dozens of simultaneous exchange
-// calls at once) until either the queue is empty or deadlineMs is reached
-// — whichever comes first. Called via waitUntil from
-// POST /api/data/refresh, i.e. AFTER that route has already responded, so
-// there's no HTTP caller left waiting on this; deadlineMs only exists to
-// keep this invocation itself from running past Vercel's own function
-// timeout. Never throws for a single pair/timeframe failure — see
-// refreshOne — and a task queue that's too big to finish before the
+// Works through `tasks` (already shuffled by planRefreshTasks — see its
+// own doc comment for why) with bounded concurrency until either the queue
+// is empty or deadlineMs is reached — whichever comes first. Called via
+// waitUntil from POST /api/data/refresh, i.e. AFTER that route has already
+// responded, so there's no HTTP caller left waiting on this; deadlineMs
+// only exists to keep this invocation itself from running past Vercel's
+// own function timeout. Never throws for a single pair/timeframe failure
+// — see refreshOne — and a task queue that's too big to finish before the
 // deadline just leaves the untouched tasks' MarketDataCache rows exactly
-// as they were (still null, for a fresh backfill), which the NEXT
-// invocation of this same route picks up as its own tasks — see that
-// route's own doc comment for why this makes the whole thing safely
-// resumable across multiple daily/manual triggers rather than needing to
-// finish in one shot.
+// as they were, which the NEXT invocation of this same route picks up —
+// see that route's own doc comment for why this makes the whole thing
+// safely resumable across multiple daily/manual triggers rather than
+// needing to finish in one shot.
+//
+// CONCURRENCY was 4; raised to 8 alongside PER_TASK_TIME_BUDGET_MS. Purely
+// I/O-bound (each worker mostly waits on OKX round-trips), and every task
+// now yields well before the chunk deadline regardless of how stale it is
+// — the previous ceiling wasn't protecting against real load, it was just
+// leaving throughput on the table while a handful of tasks silently
+// starved everything behind them (see PER_TASK_TIME_BUDGET_MS's own doc
+// comment for the production evidence).
 export async function refreshMarketDataCacheChunk(tasks: RefreshTask[], deadlineMs: number): Promise<RefreshChunkSummary> {
   const supabase = serviceRoleClient();
   const results: RefreshOneResult[] = [];
-  const CONCURRENCY = 4;
+  const CONCURRENCY = 8;
   let nextIndex = 0;
   let timedOut = false;
 
@@ -343,7 +411,12 @@ export async function refreshMarketDataCacheChunk(tasks: RefreshTask[], deadline
       }
       const index = nextIndex++;
       if (index >= tasks.length) return;
-      results.push(await refreshOne(supabase, tasks[index].pair, tasks[index].timeframe));
+      // Whichever comes first: this task's own fair-share slice, or the
+      // chunk's own overall deadline (relevant near the very end of the
+      // budget, so the last task picked up doesn't itself overrun into a
+      // hard platform kill).
+      const taskDeadlineMs = Math.min(Date.now() + PER_TASK_TIME_BUDGET_MS, deadlineMs);
+      results.push(await refreshOne(supabase, tasks[index].pair, tasks[index].timeframe, taskDeadlineMs));
     }
   }
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, tasks.length) }, worker));
@@ -353,6 +426,7 @@ export async function refreshMarketDataCacheChunk(tasks: RefreshTask[], deadline
     tasksProcessed: results.length,
     tasksRemaining: tasks.length - results.length,
     updated: results.filter((r) => r.status === "updated").length,
+    partial: results.filter((r) => r.status === "updated" && r.partial).length,
     skipped: results.filter((r) => r.status === "skipped").length,
     failed: results.filter((r) => r.status === "error").length,
     errors: results

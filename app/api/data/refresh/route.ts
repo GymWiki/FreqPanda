@@ -99,7 +99,7 @@ const handleRefresh = withErrorHandling(async (req: NextRequest) => {
       .then((chunk) => {
         console.log(
           `[data/refresh] chunk finished — processed=${chunk.tasksProcessed}/${chunk.tasksTotal} ` +
-            `updated=${chunk.updated} skipped=${chunk.skipped} failed=${chunk.failed} ` +
+            `updated=${chunk.updated} (partial=${chunk.partial}) skipped=${chunk.skipped} failed=${chunk.failed} ` +
             `timedOut=${chunk.timedOut}${chunk.timedOut ? " (remaining tasks pick up on the next trigger)" : ""}`,
         );
         if (chunk.errors.length > 0) {
