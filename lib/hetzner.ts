@@ -344,7 +344,7 @@ function writeFilesBlock(entries: Array<{ path: string; content: string; permiss
 // backs FreqAI's required include_corr_pairlist config key
 // (freqtrade/config_schema/config_schema.py — a MISSING key fails config
 // validation outright, unlike an empty list) and, since that export, also
-// lib/client-data-download.ts's own fetch-list union — otherwise a
+// lib/market-data-cache.ts's own cached-pairlist union — otherwise a
 // preloaded-data training run would silently be missing the one pair every
 // FreqAI feature set actually depends on.
 
@@ -371,11 +371,11 @@ function writeFilesBlock(entries: Array<{ path: string; content: string; permiss
 // also deep USDT pairs) are both confirmed still serving the EEA normally.
 // If either ever has its own outage/block, change these two constants —
 // every training run picks it up on its next run, no per-bot migration.
-// Exported so lib/market-data-client.ts (the server-side proxy behind
-// GET /api/train/cloud/markets-proxy and /klines-proxy — see that file's
-// own doc comment) fetches candles/markets from exactly these same two
-// exchanges, in the same order, rather than risking a second, separately
-// hardcoded copy drifting out of sync with this one.
+// Exported so lib/market-data-client.ts (used both by lib/market-data-cache.ts's
+// daily refresh job and the VM-side classic download-data fallback below)
+// fetches candles/markets from exactly these same two exchanges, in the
+// same order, rather than risking a second, separately hardcoded copy
+// drifting out of sync with this one.
 export const DATA_SOURCE_EXCHANGE = "okx";
 export const DATA_SOURCE_EXCHANGE_FALLBACK = "gate";
 export const DATA_SOURCE_EXCHANGES = [DATA_SOURCE_EXCHANGE, DATA_SOURCE_EXCHANGE_FALLBACK];
@@ -413,13 +413,13 @@ const DOWNLOAD_DATA_ATTEMPT_TIMEOUT_SECONDS = Math.max(
 // to FreqAI when auto-select is on — wide enough for the AI to find real
 // opportunities, small enough that feature engineering/backtesting for a
 // single training run stays bounded. Exported so
-// lib/market-data-client.ts's fetchTopVolumeStakePairs (behind
-// GET /api/train/cloud/markets-proxy) resolves the SAME size client-side —
-// downloading literally every active pair on the exchange for auto-select
-// bots turned out to mean 700+ files / 12,000+ background-fetch requests
-// for one bot in practice, so the client-side pre-fetch now ranks by
-// 24h quoteVolume and takes only this many, matching what VolumePairList
-// itself would hand to FreqAI anyway.
+// lib/market-data-cache.ts's refreshMarketDataCache (the daily
+// POST /api/data/refresh job) caches the SAME size — caching literally
+// every active pair on the exchange would mean thousands of pair/timeframe
+// files for a shared cache that's supposed to stay small and fast to
+// serve, so the daily refresh ranks by 24h quoteVolume (via
+// fetchTopVolumeStakePairs) and keeps only this many, matching what
+// VolumePairList itself would hand to FreqAI anyway.
 export const AUTO_PAIRLIST_SIZE = 30;
 
 // The taker fee freqtrade uses to simulate costs during backtesting/
@@ -760,41 +760,43 @@ interface TrainingCloudInitParams {
   /** How much historical data to download. Defaults to a multiple of the profile's own training window, so there's always enough history to actually fill it. */
   timerangeDays?: number;
   /**
-   * When present, candle data was already fetched client-side (browser's
-   * own network, routed through /api/train/cloud/{markets,klines}-proxy —
-   * see that pair of routes' own doc comments for why a direct browser
-   * fetch to the exchange isn't possible) and uploaded to Storage before
-   * this VM was even created (see POST /api/train/cloud's own doc comment
-   * for why provisioning is deliberately deferred until every file here
-   * has uploaded successfully). Each entry's downloadUrl is a short-lived
-   * signed Storage URL the VM curls directly — one entry per (pair,
-   * timeframe) file, matching exactly what
-   * app/api/train/cloud/upload-data/route.ts wrote. When present, the
-   * entire DOWNLOADING_DATA download-data loop below is skipped in favor
-   * of just placing these files, which is also why --data-format-ohlcv
-   * json gets added to the backtesting call below only on this path: the
-   * classic download-data path still writes the freqtrade image's own
-   * default (feather), but this path writes exactly the JSON the browser
-   * sent, unconverted.
+   * When present, candle data is already sitting in the server-maintained
+   * market-data cache (Supabase Storage, kept fresh by the daily
+   * POST /api/data/refresh job — see lib/market-data-cache.ts) — resolved
+   * by lib/train-cloud.ts just before this VM is even created via
+   * resolveCachedTrainingData, which mints a short-lived signed Storage
+   * URL per (pair, timeframe) file. This replaces both the original
+   * VM-side download-data step AND the later client-side/Background Fetch
+   * browser download that briefly replaced it — both approaches turned
+   * out unreliable (Vercel/browser limits, exchange rate limits mid-run,
+   * huge auto-select pairlists) compared to a boring, centrally-refreshed
+   * cache the VM just curls from. When present, the entire
+   * DOWNLOADING_DATA download-data loop below is skipped in favor of just
+   * placing these files, which is also why --data-format-ohlcv json gets
+   * added to the backtesting call below only on this path: the classic
+   * download-data path still writes the freqtrade image's own default
+   * (feather), but this path writes exactly the JSON the cache stores,
+   * unconverted (see lib/market-data-cache.ts's own doc comment for why
+   * JSON rather than a literal feather/parquet writer).
    */
   preloadedData?: Array<{ pair: string; timeframe: string; downloadUrl: string }>;
   /**
    * Only meaningful together with preloadedData and autoSelectCoins — the
-   * exact top-N-by-volume pairs lib/background-fetch-download.ts /
-   * lib/client-data-download.ts actually resolved and downloaded data for
-   * client-side (see their own resolvePairlist, which now ranks by
-   * quoteVolume via /api/train/cloud/markets-proxy instead of returning
-   * every active pair on the exchange — downloading literally every active
-   * pair turned out to mean 700+ files / 12,000+ background-fetch
-   * requests for one bot in practice). When present, this REPLACES the
-   * normal VolumePairList config with a StaticPairList pinned to exactly
-   * these pairs, rather than leaving VolumePairList to re-rank by volume
-   * again at backtest time — otherwise a pair that moved in or out of the
-   * live top-N between prefetch and backtest would have no local data file
-   * and fail the run. Freezing the pairlist to what was actually
-   * downloaded is a non-issue for a point-in-time backtest/training run
-   * (unlike live trading, which keeps using genuine dynamic VolumePairList
-   * — see buildFreqtradeCloudInit, a different function entirely).
+   * exact top-N-by-volume pairs the shared cache actually had complete,
+   * fresh data for (see resolveCachedTrainingData in
+   * lib/market-data-cache.ts, which ranks by quoteVolume via
+   * fetchTopVolumeStakePairs instead of caching every active pair on the
+   * exchange — caching literally every active pair would mean thousands of
+   * pair/timeframe files for a cache that's supposed to stay small and
+   * fast to serve). When present, this REPLACES the normal VolumePairList
+   * config with a StaticPairList pinned to exactly these pairs, rather
+   * than leaving VolumePairList to re-rank by volume again at backtest
+   * time — otherwise a pair that moved in or out of the live top-N between
+   * the last cache refresh and this backtest run would have no local data
+   * file and fail the run. Freezing the pairlist to what's actually cached
+   * is a non-issue for a point-in-time backtest/training run (unlike live
+   * trading, which keeps using genuine dynamic VolumePairList — see
+   * buildFreqtradeCloudInit, a different function entirely).
    */
   resolvedAutoSelectPairs?: string[];
   /**
@@ -840,10 +842,11 @@ export function buildFreqAITrainingCloudInit(params: TrainingCloudInitParams): s
     progressUrl,
     callbackToken,
     hetznerApiToken,
-    // See computeTrainingTimerangeDays's own doc comment (lib/training-timerange.ts,
-    // shared with the client-side pre-fetch orchestrator so both agree on
-    // exactly the same download window — see lib/client-data-download.ts)
-    // for why this is generously over-provisioned rather than a tight fit.
+    // See computeTrainingTimerangeDays's own doc comment (lib/training-timerange.ts)
+    // for why this is generously over-provisioned rather than a tight fit
+    // — only actually used on the classic (non-cached) download-data path
+    // below; lib/market-data-cache.ts computes its own backfill window the
+    // same way, maxed across every strategy preset instead of just this bot's.
     timerangeDays = computeTrainingTimerangeDays(freqaiConfig),
     preloadedData,
     resolvedAutoSelectPairs,
@@ -941,9 +944,9 @@ export function buildFreqAITrainingCloudInit(params: TrainingCloudInitParams): s
 
   const hasPreloadedData = !!preloadedData && preloadedData.length > 0;
 
-  // Runs instead of the classic download-data loop below when the browser
-  // already fetched every (pair, timeframe) file client-side and uploaded
-  // it to Storage (see preloadedData's own doc comment above). Each entry's
+  // Runs instead of the classic download-data loop below when the shared
+  // market-data cache already has every (pair, timeframe) file this run
+  // needs (see preloadedData's own doc comment above). Each entry's
   // downloadUrl is a short-lived signed Storage URL — curl'd straight to
   // the exact path freqtrade's own create_datadir/_pair_data_filename (see
   // idatahandler.py/misc.py in freqtrade's source) expects it at:
@@ -974,7 +977,7 @@ echo "=== all ${preloadedData!.length} preloaded data file(s) placed ===" | tee 
   // Only added to the backtesting call below when preloaded data is in
   // play: the classic download-data path (default branch) writes the
   // freqtrade image's own default format (feather), while this path writes
-  // exactly the JSON the browser sent, unconverted — see --data-format-ohlcv
+  // exactly the JSON the cache stores, unconverted — see --data-format-ohlcv
   // in freqtrade's ARGS_COMMON_OPTIMIZE (shared between download-data and
   // backtesting) for why this flag alone is enough to make backtesting read
   // JSON instead of assuming feather.

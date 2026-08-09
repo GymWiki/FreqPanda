@@ -1,7 +1,6 @@
-import type { Metadata, Viewport } from "next";
+import type { Metadata } from "next";
 import { Manrope, Space_Grotesk, IBM_Plex_Mono } from "next/font/google";
 import "./globals.css";
-import { ServiceWorkerRegistrar } from "@/components/ServiceWorkerRegistrar";
 
 // The same FreqPanda type stack app/platform and the landing page
 // introduced (Space Grotesk display, Manrope body, IBM Plex Mono
@@ -20,24 +19,12 @@ export const metadata: Metadata = {
   metadataBase: new URL(process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000"),
   title: "Freqtrade Command Center",
   description: "Train FreqAI models locally for free. Deploy your bots to the cloud in one click.",
-  // Minimal PWA basis — installability itself isn't the point here, an
-  // active service worker registration is what the client-side training
-  // data Background Fetch (see lib/background-fetch-download.ts) actually
-  // needs, but a manifest-less service worker would be an odd half-PWA.
-  manifest: "/manifest.json",
-};
-
-export const viewport: Viewport = {
-  themeColor: "#14171C",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" className={`${bodyFont.variable} ${displayFont.variable} ${monoFont.variable}`}>
-      <body className="min-h-screen font-sans antialiased">
-        <ServiceWorkerRegistrar />
-        {children}
-      </body>
+      <body className="min-h-screen font-sans antialiased">{children}</body>
     </html>
   );
 }

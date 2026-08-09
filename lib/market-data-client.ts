@@ -3,15 +3,11 @@ import { DATA_SOURCE_EXCHANGES, STAKE_CURRENCY } from "@/lib/hetzner";
 
 // Public-data counterpart to lib/ccxt-client.ts (which handles the
 // authenticated, per-user balance calls) — this one never takes API
-// credentials, since it only ever reads public market data. Backs
-// GET /api/train/cloud/markets-proxy and GET /api/train/cloud/klines-proxy,
-// which exist because a direct browser fetch() to either exchange's REST
-// API is blocked by CORS (OKX's own ccxt metadata marks 'CORS': None, and
-// Binance/Kraken have the same well-documented behavior — see the chat
-// history around 2026-08-04 for the actual verification). The client-side
-// pre-fetch orchestrator (lib/client-data-download.ts) still does the
-// actual per-pair/timeframe looping and progress tracking; this route is
-// only the one hop that has to happen server-side.
+// credentials, since it only ever reads public market data. Used by
+// lib/market-data-cache.ts's daily refresh job (POST /api/data/refresh) to
+// fetch candles/tickers for the shared, persistent market-data cache, and
+// by the classic VM-side download-data fallback (lib/hetzner.ts) when
+// that cache isn't usable for a given bot.
 //
 // Mirrors lib/ccxt-client.ts's CCXT_ID_OVERRIDES — "gate" is the one
 // mismatch between this platform's exchange ids and ccxt's own.
@@ -67,16 +63,16 @@ async function withDataSourceFallback<T>(fn: (exchange: Exchange) => Promise<T>)
 // Ranks by 24h quoteVolume and takes the top `limit` — mirrors exactly
 // what VolumePairList (sort_key: "quoteVolume", number_assets:
 // AUTO_PAIRLIST_SIZE) hands to FreqAI for a live auto-select bot, see
-// buildPairlistConfig in lib/hetzner.ts. This used to just return EVERY
-// active USDT spot market (matching the classic VM-side download-data
-// step's own ".*/USDT" regex expansion) — in practice that meant 700+
-// files / 12,000+ background-fetch requests for a single bot, which is
-// impractical to pull client-side regardless of Background Fetch or the
-// foreground fallback. buildFreqAITrainingCloudInit's resolvedAutoSelectPairs
-// param is what makes this safe: the training run's pairlist gets frozen
-// to exactly this resolved top-N (a StaticPairList) rather than leaving
-// VolumePairList to re-rank by volume again at backtest time, so there's
-// no risk of the VM wanting data for a pair this function didn't return.
+// buildPairlistConfig in lib/hetzner.ts. Backs lib/market-data-cache.ts's
+// daily refresh job — caching literally every active USDT spot market
+// (matching the classic VM-side download-data step's own ".*/USDT" regex
+// expansion) would mean thousands of pair/timeframe files for a cache
+// that's supposed to stay small and fast to serve.
+// buildFreqAITrainingCloudInit's resolvedAutoSelectPairs param is what
+// makes this safe: the training run's pairlist gets frozen to exactly the
+// cached top-N (a StaticPairList) rather than leaving VolumePairList to
+// re-rank by volume again at backtest time, so there's no risk of the VM
+// wanting data for a pair the cache doesn't have.
 export async function fetchTopVolumeStakePairs(limit: number): Promise<MarketDataResult<string[]>> {
   return withDataSourceFallback(async (exchange) => {
     const markets = await exchange.loadMarkets();
@@ -103,8 +99,8 @@ export interface OhlcvPage {
 }
 
 // One page of OHLCV candles for a single pair/timeframe, starting at
-// sinceMs — the client-side orchestrator calls this repeatedly, advancing
-// sinceMs by the last returned candle's own timestamp + 1, until a
+// sinceMs — lib/market-data-cache.ts's refresh job calls this repeatedly,
+// advancing sinceMs by the last returned candle's own timestamp + 1, until a
 // short/empty page signals it has reached "now". Deliberately thin: ccxt's
 // fetchOHLCV already normalizes pagination-cursor differences between
 // exchanges, candle-limit differences, and symbol formatting — there is no

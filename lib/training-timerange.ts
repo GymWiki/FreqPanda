@@ -1,17 +1,16 @@
 import type { FreqAIProfileConfig } from "@/lib/strategy-presets";
 
-// Pure, dependency-free (no server-only imports) so both lib/hetzner.ts
-// (cloud-init generation) and the client-side pre-fetch orchestrator (see
-// lib/client-data-download.ts) compute the exact same download window —
-// if these two ever drifted apart, the browser would fetch a different
-// range of candles than the training VM expects to find on disk.
+// Pure, dependency-free module shared by lib/hetzner.ts (cloud-init
+// generation) and lib/market-data-cache.ts (the daily cache-refresh job) so
+// both compute training/backfill windows the exact same way — if these two
+// ever drifted apart, the cache could hold a different range of candles
+// than a training run expects to find.
 
 // Live here (rather than only in lib/hetzner.ts, a server-only module that
-// pulls in the Hetzner API client, ccxt-adjacent types, etc.) for the same
-// reason as the rest of this file: lib/client-data-download.ts needs these
-// two exact values without dragging server-only code into the browser
-// bundle. lib/hetzner.ts re-exports both so every existing import of them
-// from "@/lib/hetzner" keeps working unchanged.
+// also pulls in the Hetzner API client) so lib/market-data-cache.ts can
+// import just these two small values without the rest of lib/hetzner.ts.
+// lib/hetzner.ts re-exports both so every existing import of them from
+// "@/lib/hetzner" keeps working unchanged.
 export const STAKE_CURRENCY = "USDT";
 /** FreqAI's include_corr_pairlist benchmark pair — see lib/hetzner.ts's own doc comment (where this is re-exported) for why it's a fixed platform default rather than per-bot. */
 export const DEFAULT_CORR_PAIRLIST = [`BTC/${STAKE_CURRENCY}`];
@@ -69,7 +68,7 @@ function fmtYyyymmdd(d: Date): string {
 export interface TrainingTimerange {
   /** freqtrade's own "yyyymmdd-yyyymmdd" --timerange string. */
   timerangeString: string;
-  /** Inclusive start of the range, as a millisecond timestamp — what the client-side fetcher pages forward from. */
+  /** Inclusive start of the range, as a millisecond timestamp — what a paginated fetch pages forward from. */
   startMs: number;
   /** End of the range (now), as a millisecond timestamp. */
   endMs: number;

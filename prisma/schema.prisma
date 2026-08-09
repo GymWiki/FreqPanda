@@ -347,3 +347,31 @@ model TrainingJob {
   @@index([status])
   @@map("training_jobs")
 }
+
+// Metadata for the server-maintained, daily-refreshed historical-candle
+// cache (see app/api/data/refresh and lib/market-data-cache.ts) — one row
+// per (exchange, pair, timeframe) actually cached. The candle data itself
+// lives in the "market-data" Supabase Storage bucket as a JSON file, never
+// in Postgres — only bookkeeping here, which is what lets
+// lib/train-cloud.ts figure out what's available and how stale it is
+// without ever touching Storage until it actually needs to mint a signed
+// download URL. exchange is stored (not assumed to always equal the
+// current DATA_SOURCE_EXCHANGE) so a future exchange switch doesn't cause
+// stale rows from the old exchange to be silently mistaken for the new
+// one — see lib/market-data-cache.ts's own doc comment.
+model MarketDataCache {
+  id        String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  exchange  String
+  pair      String
+  timeframe String
+
+  storagePath   String   @map("storage_path")
+  candleCount   Int      @map("candle_count")
+  firstCandleAt DateTime @map("first_candle_at")
+  lastCandleAt  DateTime @map("last_candle_at")
+
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([exchange, pair, timeframe])
+  @@map("market_data_cache")
+}

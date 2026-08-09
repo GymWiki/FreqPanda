@@ -1,4 +1,3 @@
-import { createClient as createServiceRoleClient } from "@supabase/supabase-js";
 import { prisma } from "@/lib/prisma";
 import type { Prisma } from "@prisma/client";
 import { decrypt } from "@/lib/encryption";
@@ -6,20 +5,13 @@ import { buildFreqAITrainingCloudInit, createHetznerServer, requireHetznerToken 
 import { DEFAULT_PAPER_TOTAL_BUDGET, DEFAULT_PAPER_MAX_STAKE_PERCENTAGE } from "@/lib/paper-trading-defaults";
 import { generateCallbackToken, hashCallbackToken } from "@/lib/training-token";
 import { stopBot, forceExitAll } from "@/lib/freqtrade-client";
-import { pairToFreqtradeFilename } from "@/lib/freqtrade-format";
+import { resolveCachedTrainingData } from "@/lib/market-data-cache";
+import { DEFAULT_CORR_PAIRLIST } from "@/lib/training-timerange";
 import type { FreqAIProfileConfig } from "@/lib/strategy-presets";
 
 type BotRow = Prisma.BotConfigurationGetPayload<object>;
 
 const TRAINING_SERVER_TYPE = process.env.HETZNER_TRAINING_SERVER_TYPE || "cpx31";
-const MODELS_BUCKET = "models";
-// Comfortably longer than PULLING_IMAGE could ever realistically take
-// (the one stage that runs before the VM curls these) — a signed download
-// URL only has to survive from "job created" to "preloadedDataScript's
-// curl calls run", not the whole training run (contrast
-// /api/train/cloud/upload-url's ~2h signed *upload* URL, which has to
-// survive until training finishes).
-const PRELOADED_DATA_URL_EXPIRY_SECONDS = 3600;
 
 export class TrainingBusyError extends Error {}
 
@@ -27,57 +19,6 @@ interface StartCloudTrainingParams {
   bot: BotRow;
   /** Force-close open positions before pausing, instead of just halting new entries. Only meaningful if the bot is currently deployed (paper or live). */
   cancelOpenOrders?: boolean;
-  /**
-   * Set only by the client-side pre-fetch flow (see
-   * components/BotCard.tsx's handleStartCloudTraining and
-   * lib/client-data-download.ts) — the browser has already fetched and
-   * uploaded every (pair, timeframe) file to Storage under
-   * `${bot.userId}/${bot.id}/training-data/${uploadSessionId}/` (see
-   * app/api/train/cloud/upload-data/route.ts) before this function is even
-   * called. `files` is the browser's own record of which ones it uploaded;
-   * this function still mints (and can fail on) real signed URLs for each
-   * exact path rather than trusting that the objects exist.
-   */
-  preloadedData?: { uploadSessionId: string; files: Array<{ pair: string; timeframe: string }> };
-  /** Only meaningful together with preloadedData when bot.autoSelectCoins is true — see that param's own doc comment on buildFreqAITrainingCloudInit in lib/hetzner.ts. */
-  resolvedAutoSelectPairs?: string[];
-}
-
-// Mints signed GET URLs for every uploaded training-data file so the VM can
-// curl them directly (see preloadedDataScript in lib/hetzner.ts). Uses the
-// service-role key rather than a user session: this function has no request
-// context of its own (it's also called from the retrain_needed webhook
-// path, which never has a browser session), and every path here is
-// computed entirely from our own trusted bot/job identifiers, never from
-// caller input — same reasoning as /api/train/cloud/upload-url's own
-// service-role usage.
-async function resolvePreloadedDataUrls(
-  bot: BotRow,
-  preloadedData: NonNullable<StartCloudTrainingParams["preloadedData"]>,
-): Promise<Array<{ pair: string; timeframe: string; downloadUrl: string }>> {
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!serviceRoleKey) {
-    throw new Error("SUPABASE_SERVICE_ROLE_KEY is not configured");
-  }
-  const supabase = createServiceRoleClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, serviceRoleKey);
-
-  const objectPaths = preloadedData.files.map(
-    ({ pair, timeframe }) =>
-      `${bot.userId}/${bot.id}/training-data/${preloadedData.uploadSessionId}/${pairToFreqtradeFilename(pair)}-${timeframe}.json`,
-  );
-  const { data, error } = await supabase.storage.from(MODELS_BUCKET).createSignedUrls(objectPaths, PRELOADED_DATA_URL_EXPIRY_SECONDS);
-  if (error || !data) {
-    throw new Error(`Could not create signed download URLs for preloaded training data: ${error?.message}`);
-  }
-  return preloadedData.files.map(({ pair, timeframe }, i) => {
-    const entry = data[i];
-    if (!entry || entry.error || !entry.signedUrl) {
-      throw new Error(
-        `Preloaded training data missing or inaccessible for ${pair} ${timeframe} (uploadSessionId=${preloadedData.uploadSessionId}): ${entry?.error ?? "not found"}`,
-      );
-    }
-    return { pair, timeframe, downloadUrl: entry.signedUrl };
-  });
 }
 
 // The single place a cloud training job gets created — called directly by
@@ -87,12 +28,7 @@ async function resolvePreloadedDataUrls(
 // the bot is currently deployed — paper or live, both actually run the
 // freqtrade loop — it is genuinely paused (via its own freqtrade REST API,
 // not just a database flag) before any training bookkeeping happens.
-export async function startCloudTrainingJob({
-  bot,
-  cancelOpenOrders = false,
-  preloadedData,
-  resolvedAutoSelectPairs,
-}: StartCloudTrainingParams) {
+export async function startCloudTrainingJob({ bot, cancelOpenOrders = false }: StartCloudTrainingParams) {
   const activeJob = await prisma.trainingJob.findFirst({
     where: { botId: bot.id, status: { in: ["QUEUED", "TRAINING"] } },
   });
@@ -161,18 +97,26 @@ export async function startCloudTrainingJob({
   });
 
   try {
-    // Resolved before buildFreqAITrainingCloudInit so a missing/expired
-    // upload is caught here — inside this same try/catch, before any
-    // Hetzner API call is ever made — rather than only surfacing much
-    // later as an opaque curl failure on the VM itself.
-    const preloadedFileUrls = preloadedData ? await resolvePreloadedDataUrls(bot, preloadedData) : undefined;
+    const freqaiConfig = bot.freqaiConfig as unknown as FreqAIProfileConfig;
+    // Only auto-select bots use the shared cache — a manual/static
+    // pairWhitelist can be any pair at all, not necessarily one of the
+    // top-N-by-volume pairs the cache actually stores, so those keep using
+    // the classic on-VM download-data loop unchanged (see
+    // resolveCachedTrainingData's own doc comment in
+    // lib/market-data-cache.ts). null here (no usable cache — empty,
+    // stale, or genuinely never triggers for a manual bot) just means
+    // buildFreqAITrainingCloudInit falls back to that same classic loop —
+    // never a reason to fail this job.
+    const cached = bot.autoSelectCoins
+      ? await resolveCachedTrainingData(freqaiConfig.features.includeTimeframes)
+      : null;
 
     const cloudInit = buildFreqAITrainingCloudInit({
       botName: bot.botName,
       exchangeName: bot.exchangeName,
       strategy: bot.strategy,
       strategyCode: bot.strategyCode,
-      freqaiConfig: bot.freqaiConfig as unknown as FreqAIProfileConfig,
+      freqaiConfig,
       autoSelectCoins: bot.autoSelectCoins,
       pairWhitelist: bot.pairWhitelist ? bot.pairWhitelist.split(",").map((p) => p.trim()).filter(Boolean) : [],
       totalBudget: bot.totalBudget ?? DEFAULT_PAPER_TOTAL_BUDGET,
@@ -183,8 +127,17 @@ export async function startCloudTrainingJob({
       progressUrl: `${appUrl}/api/train/cloud/progress`,
       callbackToken,
       hetznerApiToken,
-      preloadedData: preloadedFileUrls,
-      resolvedAutoSelectPairs,
+      preloadedData: cached?.files,
+      // Trading pairlist, not the download list: cached.pairs includes
+      // DEFAULT_CORR_PAIRLIST's correlation-only pair (needed for
+      // feature_engineering, never meant to be auto-tradable on its own
+      // merits) alongside the real top-N-by-volume pairs — subtracted
+      // here so a StaticPairList built from this never trades a pair that
+      // was only ever fetched for correlation data. In virtually every
+      // real case that pair is ALSO organically top-volume already (BTC
+      // dominates volume on any real exchange), so this rarely actually
+      // excludes anything that belonged in the tradable set anyway.
+      resolvedAutoSelectPairs: cached?.pairs.filter((p) => !DEFAULT_CORR_PAIRLIST.includes(p)),
     });
 
     // Explicit markers either side of the one call that actually leaves
