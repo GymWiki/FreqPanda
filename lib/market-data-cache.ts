@@ -56,12 +56,16 @@ const CACHED_TIMEFRAMES = Array.from(
 // timerange, just maxed across every preset instead of one.
 const BACKFILL_DAYS = Math.max(...STRATEGY_PRESETS.map((preset) => computeTrainingTimerangeDays(preset.freqaiConfig)));
 
-// A refresh that hasn't run (or has failed) for longer than this makes a
-// pair/timeframe's cached data too stale to trust for a fresh training run
-// — comfortably more than the daily refresh interval, so ONE missed or
-// failed run (see point 8 of the original ask) never blocks training; two
-// or more in a row does, which is the intended behavior, not a bug.
-const CACHE_MAX_STALENESS_HOURS = 48;
+// How close to "now" a pair/timeframe's actual cached candles (lastCandleAt)
+// have to reach before they're trusted for a training run — see
+// resolveCachedTrainingData's own doc comment for why this is checked
+// against lastCandleAt and NOT MarketDataCache.updatedAt (an earlier,
+// buggy version of this check used updatedAt, which stays "fresh" even
+// when a refresh only made partial progress on a badly-stale pair).
+// Comfortably more than the daily refresh interval, so ONE missed or
+// failed run (see point 8 of the original ask) never blocks training on
+// its own; several in a row does, which is the intended behavior.
+const CACHE_DATA_FRESHNESS_HOURS = 24;
 
 // createSignedUrls' request-body/response-size limits aren't documented,
 // so chunk any batch call rather than risk one giant request for a bot
@@ -437,10 +441,12 @@ export async function refreshMarketDataCacheChunk(tasks: RefreshTask[], deadline
 }
 
 export interface CachedTrainingData {
-  /** Every pair with complete, fresh cached data for all requested timeframes — includes DEFAULT_CORR_PAIRLIST's correlation-only pair if present. */
+  /** Every pair with complete, fresh cached data for all requested timeframes — includes DEFAULT_CORR_PAIRLIST's correlation-only pair if it itself qualifies (see selectTrainablePairs, which is what actually decides whether that's required). */
   pairs: string[];
   /** One entry per (pair, timeframe); downloadUrls is every partition file covering that pair/timeframe's cached range, oldest first — see preloadedDataScript in lib/hetzner.ts for how the VM concatenates them back into the single file freqtrade expects. */
   files: Array<{ pair: string; timeframe: string; downloadUrls: string[] }>;
+  /** Every distinct pair the cache has ANY row for across these timeframes, ready or not — lets callers report which specific pairs were excluded, not just which made it in. */
+  candidatePairs: string[];
 }
 
 async function createSignedUrlsBatched(
@@ -465,24 +471,44 @@ async function createSignedUrlsBatched(
 
 // Called at training job-start (lib/train-cloud.ts) for an auto-select bot
 // — resolves whatever the shared cache currently has for the requested
-// timeframes into signed download URLs, or returns null if the cache isn't
-// usable (empty, too stale, or missing the correlation-only pair FreqAI's
-// include_corr_pairlist needs). null is always a safe, non-fatal signal:
-// the caller just falls back to the classic on-VM download-data loop.
+// timeframes into signed download URLs. Always returns a result (never
+// null); an empty `pairs`/`files` just means nothing currently qualifies.
+// Callers deciding whether that's actually ENOUGH to train on should use
+// selectTrainablePairs below, not call this directly.
 //
-// Only a pair with ALL requested timeframes present and fresh is included
-// — a partial pair (missing one timeframe) would leave FreqAI's
-// feature_engineering_expand_*() with nothing to read for that timeframe,
-// so it's excluded entirely rather than passed through incomplete.
-export async function resolveCachedTrainingData(timeframes: string[]): Promise<CachedTrainingData | null> {
-  const staleCutoff = new Date(Date.now() - CACHE_MAX_STALENESS_HOURS * 60 * 60 * 1000);
+// Only a pair with ALL requested timeframes present and fresh (lastCandleAt
+// within CACHE_DATA_FRESHNESS_HOURS of now — see that constant's own doc
+// comment for why lastCandleAt, not updatedAt) is included in `pairs` — a
+// partial pair (missing one timeframe, or stale on one) would leave
+// FreqAI's feature_engineering_expand_*() with nothing usable to read for
+// that timeframe, so it's excluded entirely rather than passed through
+// incomplete.
+export async function resolveCachedTrainingData(timeframes: string[]): Promise<CachedTrainingData> {
   const rows = await prisma.marketDataCache.findMany({
-    where: { exchange: DATA_SOURCE_EXCHANGE, timeframe: { in: timeframes }, updatedAt: { gte: staleCutoff } },
+    where: { exchange: DATA_SOURCE_EXCHANGE, timeframe: { in: timeframes } },
   });
-  if (rows.length === 0) return null;
+  const candidatePairs = Array.from(new Set(rows.map((r) => r.pair)));
+  if (rows.length === 0) return { pairs: [], files: [], candidatePairs };
 
-  const rowsByPair = new Map<string, typeof rows>();
-  for (const row of rows) {
+  // How close to "now" a pair/timeframe's actual cached candles have to
+  // reach before they're trusted for a training run — checked against
+  // lastCandleAt (how far the DATA itself reaches), not updatedAt (when
+  // the row was last WRITTEN to). Those used to be conflated, which was a
+  // real bug: refreshOne's own per-task time cap (see that function's doc
+  // comment) means a severely-stale pair gets its updatedAt bumped on
+  // every partial-progress run even though lastCandleAt barely moves, so
+  // an updatedAt-based check kept marking months-stale pairs "fresh
+  // enough" the instant ANY worker merely touched them — and FreqAI then
+  // crashed with "No data found" trying to backtest a window that data
+  // never remotely covered. computeTrainingTimerange's own window always
+  // ends at "now" (see its doc comment in lib/training-timerange.ts), so
+  // lastCandleAt reaching close to now is the only signal that actually
+  // means the cached data is usable.
+  const freshnessCutoff = new Date(Date.now() - CACHE_DATA_FRESHNESS_HOURS * 60 * 60 * 1000);
+  const freshRows = rows.filter((row) => row.lastCandleAt >= freshnessCutoff);
+
+  const rowsByPair = new Map<string, typeof freshRows>();
+  for (const row of freshRows) {
     const group = rowsByPair.get(row.pair) ?? [];
     group.push(row);
     rowsByPair.set(row.pair, group);
@@ -490,7 +516,7 @@ export async function resolveCachedTrainingData(timeframes: string[]): Promise<C
   const usableRows = Array.from(rowsByPair.values())
     .filter((group) => group.length === timeframes.length)
     .flat();
-  if (usableRows.length === 0) return null;
+  if (usableRows.length === 0) return { pairs: [], files: [], candidatePairs };
 
   // Every calendar day between each row's own firstCandleAt/lastCandleAt is
   // a *candidate* partition path — not every one is guaranteed to exist
@@ -517,7 +543,7 @@ export async function resolveCachedTrainingData(timeframes: string[]): Promise<C
       });
     }
   }
-  if (planned.length === 0) return null;
+  if (planned.length === 0) return { pairs: [], files: [], candidatePairs };
 
   const supabase = serviceRoleClient();
   const signed = await createSignedUrlsBatched(
@@ -551,10 +577,59 @@ export async function resolveCachedTrainingData(timeframes: string[]): Promise<C
   const files = Array.from(filesByPair.values())
     .filter((group) => group.length === timeframes.length)
     .flat();
-  if (files.length === 0) return null;
+  if (files.length === 0) return { pairs: [], files: [], candidatePairs };
 
   const pairs = Array.from(new Set(files.map((f) => f.pair)));
-  if (!DEFAULT_CORR_PAIRLIST.every((p) => pairs.includes(p))) return null;
+  return { pairs, files, candidatePairs };
+}
 
-  return { pairs, files };
+export interface TrainablePairsResult {
+  /** False means don't start this training run — see selectTrainablePairs' own doc comment. */
+  ready: boolean;
+  /** Pairs with complete, fresh cached data for every requested timeframe. Always includes DEFAULT_CORR_PAIRLIST's pair when `ready` (missingCorrPair would be true otherwise). Populated even when `!ready`, for logging — callers should still gate actually using it on `ready`. */
+  pairs: string[];
+  files: Array<{ pair: string; timeframe: string; downloadUrls: string[] }>;
+  /** How many pairs currently qualify — populated whether ready or not, so callers can report "X/Y klaar" either way. */
+  readyPairCount: number;
+  /** Nominal target pairlist size (AUTO_PAIRLIST_SIZE) — the "Y" in "X/Y". */
+  targetPairCount: number;
+  /** True when the correlation-only pair (DEFAULT_CORR_PAIRLIST) itself isn't ready — training can never proceed without it (FreqAI's include_corr_pairlist requires it), no matter how many other pairs qualify. */
+  missingCorrPair: boolean;
+  /** Every pair the cache has attempted to track (ready or not), for reporting which specific pairs were excluded from the last run. */
+  candidatePairs: string[];
+}
+
+// Training-flow policy layered on top of resolveCachedTrainingData's raw
+// cache state: decides whether there's ENOUGH fresh, complete data to
+// actually start a meaningful auto-select training run right now, instead
+// of either extreme — (a) blindly handing FreqAI whatever's cached and
+// letting backtesting crash with a cryptic "No data found" the moment even
+// ONE requested pair turns out stale (what happened before this existed:
+// a single straggler pair failed the entire run), or (b) requiring
+// literally all AUTO_PAIRLIST_SIZE pairs to be ready before ANY run can
+// happen — a bar that, while the cache works through a large backlog (see
+// refreshOne/refreshMarketDataCacheChunk's own doc comments for why that
+// can take several runs), might not clear for a long time even though
+// most pairs are already genuinely usable.
+//
+// MIN_TRAINABLE_PAIRS is the middle ground: build the run's pairlist from
+// whichever pairs ARE ready right now (excluded pairs just sit out this
+// run — the background refresh keeps working on them for next time,
+// entirely independently of this check), and only refuse to start once
+// that's too few to be a meaningful auto-select universe.
+export const MIN_TRAINABLE_PAIRS = 12;
+
+export async function selectTrainablePairs(timeframes: string[]): Promise<TrainablePairsResult> {
+  const cached = await resolveCachedTrainingData(timeframes);
+  const missingCorrPair = !DEFAULT_CORR_PAIRLIST.every((p) => cached.pairs.includes(p));
+  const readyPairCount = cached.pairs.length;
+  return {
+    ready: !missingCorrPair && readyPairCount >= MIN_TRAINABLE_PAIRS,
+    pairs: cached.pairs,
+    files: cached.files,
+    readyPairCount,
+    targetPairCount: AUTO_PAIRLIST_SIZE,
+    missingCorrPair,
+    candidatePairs: cached.candidatePairs,
+  };
 }

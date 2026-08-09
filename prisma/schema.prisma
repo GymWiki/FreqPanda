@@ -340,6 +340,15 @@ model TrainingJob {
   errorMessage    String? @map("error_message")
   aiModelPath     String? @map("ai_model_path")
 
+  // Auto-select cache-driven pairlist bookkeeping — see selectTrainablePairs
+  // in lib/market-data-cache.ts. Both null for a manual/static pairWhitelist
+  // bot (this concept doesn't apply) and for any run that never reached
+  // job creation (a not-ready run is rejected before a TrainingJob row
+  // exists at all — see TrainingDataNotReadyError in lib/train-cloud.ts).
+  // Comma-separated, same convention as BotConfiguration.pairWhitelist.
+  trainedPairs   String? @map("trained_pairs") // pairs this run actually traded (StaticPairList content)
+  candidatePairs String? @map("candidate_pairs") // every pair the cache was tracking at job-start, ready or not — trainedPairs minus this set is what got excluded
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 

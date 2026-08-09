@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { createClient } from "@/lib/supabase/server";
 import { prisma } from "@/lib/prisma";
-import { startCloudTrainingJob, TrainingBusyError } from "@/lib/train-cloud";
+import { startCloudTrainingJob, TrainingBusyError, TrainingDataNotReadyError } from "@/lib/train-cloud";
 import { withErrorHandling, parseJsonBody } from "@/lib/api-handler";
 
 export const dynamic = "force-dynamic";
@@ -52,6 +52,13 @@ export const POST = withErrorHandling(async (req: NextRequest) => {
   } catch (err) {
     if (err instanceof TrainingBusyError) {
       return NextResponse.json({ error: err.message }, { status: 409 });
+    }
+    if (err instanceof TrainingDataNotReadyError) {
+      // 503, not 502/500 — this isn't a failure of anything, it's an
+      // accurate "come back later" signal while the background refresh
+      // catches the rest of the pairlist up (see selectTrainablePairs in
+      // lib/market-data-cache.ts).
+      return NextResponse.json({ error: err.message }, { status: 503 });
     }
     console.error(`[train/cloud] Failed to start cloud training for bot ${bot.id}:`, err);
     const message = err instanceof Error ? err.message : "Failed to start cloud training";
