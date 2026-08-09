@@ -355,7 +355,7 @@ function writeFilesBlock(entries: Array<{ path: string; content: string; permiss
 // linked), which is only relevant once real money moves (live `trade`, see
 // buildFreqtradeCloudInit) and is the user's own choice, not ours to
 // guarantee. Training's own VM never receives real account credentials in
-// the first place (see the doc comment on buildFreqAITrainingCloudInit
+// the first place (see the doc comment on buildFreqAITrainingArtifacts
 // below), so there was never a reason to tie its data source to whichever
 // exchange the bot happens to trade on.
 //
@@ -816,14 +816,36 @@ interface TrainingCloudInitParams {
   maxRuntimeHours?: number;
 }
 
-// Builds a cloud-init script for an ephemeral training VM: installs Docker,
-// writes the strategy source, downloads historical data, trains a FreqAI
-// model via `backtesting` (freqtrade has no standalone "train" command —
-// training happens as a side effect of backtesting with FreqAI enabled),
-// uploads the single resulting .joblib to a pre-signed Supabase Storage
-// URL, reports status back to our API, and unconditionally deletes itself.
-// Callers should attach the "training" firewall profile (no inbound rules
-// at all — this VM never needs to accept a connection).
+export interface TrainingArtifacts {
+  configJson: string;
+  strategyCode: string;
+  trainScript: string;
+  /** Pass-through of params.maxRuntimeHours (with its default already applied) — the outer bootstrap cloud-init needs it for the `timeout` wrapper around train.sh, even though it plays no part in building the artifacts themselves. */
+  maxRuntimeHours: number;
+}
+
+// Builds the actual content of an ephemeral training VM's setup: a
+// config.json, the strategy source, and a train.sh that installs Docker,
+// downloads historical data, trains a FreqAI model via `backtesting`
+// (freqtrade has no standalone "train" command — training happens as a
+// side effect of backtesting with FreqAI enabled), uploads the single
+// resulting .joblib to a pre-signed Supabase Storage URL, reports status
+// back to our API, and unconditionally deletes the VM.
+//
+// Deliberately returns these as plain strings rather than a ready-to-use
+// cloud-init document — see uploadTrainingBootstrap
+// (lib/training-bootstrap.ts) and buildTrainingBootstrapCloudInit below.
+// Earlier, this function returned the full `#cloud-config` document
+// directly, with all three of these embedded verbatim via cloud-init's
+// write_files. That worked fine until preloadedData (see its own doc
+// comment below) started carrying a signed Storage URL per cached
+// day-partition: a fully-backfilled auto-select bot's train.sh alone can
+// reach several MB once every partition URL for every (pair, timeframe) is
+// embedded in it — comfortably over Hetzner's own 32768-byte user_data
+// limit (the exact 422 "Length must be between 0 and 32768" error this
+// split exists to prevent). Supabase Storage has no such limit, so the
+// caller (lib/train-cloud.ts) uploads these three there instead and hands
+// the training VM a short bootstrap that curls them into place after boot.
 //
 // Deliberately does NOT take exchange API credentials: downloading history
 // and backtesting only need public market data, so the user's real trading
@@ -832,7 +854,7 @@ interface TrainingCloudInitParams {
 // DATA_SOURCE_EXCHANGE_FALLBACK retried on failure), never params.exchangeName
 // (only still used for its static fee-table lookup, and may be null anyway)
 // — see DATA_SOURCE_EXCHANGE's doc comment for why.
-export function buildFreqAITrainingCloudInit(params: TrainingCloudInitParams): string {
+export function buildFreqAITrainingArtifacts(params: TrainingCloudInitParams): TrainingArtifacts {
   const {
     botName,
     exchangeName,
@@ -1197,18 +1219,52 @@ report_status "COMPLETED"
 exit 0
 `;
 
-  // Runs in cloud-init's "init" stage, before package_update/packages (the
-  // apt install of docker.io/curl/jq) and before runcmd — the earliest
-  // point anything on this VM can phone home. Investigated after two
-  // separate incidents where a job sat at stage QUEUED (i.e. before even
-  // PULLING_IMAGE, the *next* checkpoint, which only fires after packages
-  // are installed) for its entire lifetime with zero information on
-  // whether the VM ever booted at all. A BOOTED report received with no
-  // PULLING_IMAGE after it narrows the failure to package
-  // install/runcmd; no BOOTED at all means the VM (or cloud-init itself)
-  // never started. Best-effort like every other report_* call — `|| true`
+  return { configJson, strategyCode, trainScript, maxRuntimeHours };
+}
+
+interface TrainingBootstrapCloudInitParams {
+  strategy: string;
+  progressUrl: string;
+  callbackToken: string;
+  maxRuntimeHours: number;
+  /** Signed Storage URLs from uploadTrainingBootstrap (lib/training-bootstrap.ts) — see that module's own doc comment for why these three artifacts live in Storage instead of inline write_files. */
+  configUrl: string;
+  strategyUrl: string;
+  trainScriptUrl: string;
+}
+
+// The actual document handed to Hetzner's server-create API — deliberately
+// tiny (well under the 32768-byte user_data limit regardless of how big a
+// fully-cached auto-select bot's train.sh ends up being in Storage) since
+// all it does is report the BOOTED checkpoint, install the same packages
+// train.sh itself needs (docker.io so it can run; curl/jq so it can fetch
+// its own preloaded-data partitions), then curl the three real artifacts
+// into place and hand off to train.sh, which is where every other safety
+// mechanism (self-destruct, status reporting, the outer timeout wrapper)
+// already lived before this split and still does, entirely unchanged.
+//
+// A fetch failure here (an expired signed URL, a network blip right after
+// boot) falls into the same failure category cloud-init itself already
+// has — e.g. the docker.io package install failing — and gets caught the
+// same existing way: no PULLING_IMAGE checkpoint ever follows BOOTED, which
+// GET /api/train/cloud/reap already treats as a stuck job worth cleaning up
+// (see that route's own doc comment). --retry gives each fetch a few
+// chances before giving up rather than failing on the first transient
+// error, which is the only accommodation this step needs.
+export function buildTrainingBootstrapCloudInit(params: TrainingBootstrapCloudInitParams): string {
+  const { strategy, progressUrl, callbackToken, maxRuntimeHours, configUrl, strategyUrl, trainScriptUrl } = params;
+
+  // Runs in cloud-init's "init" stage, before package_update/packages and
+  // before runcmd — the earliest point anything on this VM can phone home.
+  // Investigated after two separate incidents where a job sat at stage
+  // QUEUED (i.e. before even PULLING_IMAGE, the *next* checkpoint, which
+  // only fires after packages are installed and train.sh has been fetched)
+  // for its entire lifetime with zero information on whether the VM ever
+  // booted at all. Best-effort like every other report_* call — `|| true`
   // so a failed curl here can never affect boot.
   const bootCheckpointCmd = `curl -fsS -m 15 -X POST "${shellEscapeDouble(progressUrl)}" -H "Authorization: Bearer ${shellEscapeDouble(callbackToken)}" -H "Content-Type: application/json" -d '{"stage":"BOOTED"}' || true`;
+
+  const fetchFlags = "-fsS -m 30 --retry 3 --retry-delay 2";
 
   return `#cloud-config
 bootcmd:
@@ -1221,14 +1277,12 @@ packages:
   - curl
   - jq
 
-write_files:
-${writeFilesBlock([
-  { path: "/opt/freqtrade/user_data/config.json", content: configJson },
-  { path: `/opt/freqtrade/user_data/strategies/${strategy}.py`, content: strategyCode },
-  { path: "/opt/train.sh", content: trainScript, permissions: "0700" },
-])}
-
 runcmd:
+  - mkdir -p /opt/freqtrade/user_data/strategies
+  - curl ${fetchFlags} -o /opt/freqtrade/user_data/config.json "${shellEscapeDouble(configUrl)}"
+  - curl ${fetchFlags} -o /opt/freqtrade/user_data/strategies/${strategy}.py "${shellEscapeDouble(strategyUrl)}"
+  - curl ${fetchFlags} -o /opt/train.sh "${shellEscapeDouble(trainScriptUrl)}"
+  - chmod 0700 /opt/train.sh
   - systemctl enable docker
   - systemctl start docker
   - timeout --signal=TERM --kill-after=30s ${maxRuntimeHours}h /opt/train.sh

@@ -32,7 +32,7 @@ export interface FreqAIFeatureConfig {
    * signals independent of anything FreqAI itself learned. Set generously
    * above the largest indicatorPeriods entry, regardless of timeframe —
    * lib/hetzner.ts also folds this into how many days of history a
-   * training run downloads (see buildFreqAITrainingCloudInit).
+   * training run downloads (see buildFreqAITrainingArtifacts).
    */
   startupCandleCount: number;
 }

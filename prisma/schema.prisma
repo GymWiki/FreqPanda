@@ -86,7 +86,7 @@ enum TrainingStatus {
 
 // Coarse phase within a single cloud training run — reported by the
 // training VM's own script at each real checkpoint (see lib/hetzner.ts
-// buildFreqAITrainingCloudInit's report_stage calls) via
+// buildFreqAITrainingArtifacts's report_stage calls) via
 // POST /api/train/cloud/progress. This is a genuine signal, not a guess:
 // freqtrade's `backtesting` command (how FreqAI training actually runs)
 // has no fine-grained progress API to poll, so GET /api/train/cloud/status

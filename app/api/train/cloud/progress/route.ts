@@ -11,7 +11,7 @@ const progressBodySchema = z.object({
 });
 
 // Best-effort checkpoint the training VM's own script calls at each real
-// phase boundary (see lib/hetzner.ts buildFreqAITrainingCloudInit's
+// phase boundary (see lib/hetzner.ts buildFreqAITrainingArtifacts's
 // report_stage) — deliberately separate from POST /api/train/cloud/callback,
 // which handles the one terminal COMPLETED/FAILED report and its much
 // heavier side effects (redeploying a bot, resuming trading). This route

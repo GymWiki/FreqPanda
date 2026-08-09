@@ -60,7 +60,7 @@ export function computeTrainingTimerangeDays(freqaiConfig: FreqAIProfileConfig):
   );
 }
 
-// yyyymmdd, freqtrade's own --timerange format (see buildFreqAITrainingCloudInit).
+// yyyymmdd, freqtrade's own --timerange format (see buildFreqAITrainingArtifacts).
 function fmtYyyymmdd(d: Date): string {
   return d.toISOString().slice(0, 10).replace(/-/g, "");
 }

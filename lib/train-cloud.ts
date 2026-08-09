@@ -1,11 +1,12 @@
 import { prisma } from "@/lib/prisma";
 import type { Prisma } from "@prisma/client";
 import { decrypt } from "@/lib/encryption";
-import { buildFreqAITrainingCloudInit, createHetznerServer, requireHetznerToken } from "@/lib/hetzner";
+import { buildFreqAITrainingArtifacts, buildTrainingBootstrapCloudInit, createHetznerServer, requireHetznerToken } from "@/lib/hetzner";
 import { DEFAULT_PAPER_TOTAL_BUDGET, DEFAULT_PAPER_MAX_STAKE_PERCENTAGE } from "@/lib/paper-trading-defaults";
 import { generateCallbackToken, hashCallbackToken } from "@/lib/training-token";
 import { stopBot, forceExitAll } from "@/lib/freqtrade-client";
 import { resolveCachedTrainingData } from "@/lib/market-data-cache";
+import { uploadTrainingBootstrap } from "@/lib/training-bootstrap";
 import { DEFAULT_CORR_PAIRLIST } from "@/lib/training-timerange";
 import type { FreqAIProfileConfig } from "@/lib/strategy-presets";
 
@@ -105,13 +106,23 @@ export async function startCloudTrainingJob({ bot, cancelOpenOrders = false }: S
     // resolveCachedTrainingData's own doc comment in
     // lib/market-data-cache.ts). null here (no usable cache — empty,
     // stale, or genuinely never triggers for a manual bot) just means
-    // buildFreqAITrainingCloudInit falls back to that same classic loop —
+    // buildFreqAITrainingArtifacts falls back to that same classic loop —
     // never a reason to fail this job.
     const cached = bot.autoSelectCoins
       ? await resolveCachedTrainingData(freqaiConfig.features.includeTimeframes)
       : null;
 
-    const cloudInit = buildFreqAITrainingCloudInit({
+    // Split in two: buildFreqAITrainingArtifacts is pure (config.json, the
+    // strategy source, train.sh — the latter potentially several MB once a
+    // fully-backfilled auto-select cache's signed partition URLs are
+    // embedded in it, see preloadedData's own doc comment), then
+    // uploadTrainingBootstrap ships those three to the private
+    // "training-bootstrap" Storage bucket so the actual user_data handed to
+    // Hetzner (buildTrainingBootstrapCloudInit) only has to carry three
+    // short signed URLs — comfortably under Hetzner's 32768-byte user_data
+    // limit regardless of how big train.sh itself gets. See
+    // lib/training-bootstrap.ts's own doc comment for the full reasoning.
+    const artifacts = buildFreqAITrainingArtifacts({
       botName: bot.botName,
       exchangeName: bot.exchangeName,
       strategy: bot.strategy,
@@ -138,6 +149,17 @@ export async function startCloudTrainingJob({ bot, cancelOpenOrders = false }: S
       // dominates volume on any real exchange), so this rarely actually
       // excludes anything that belonged in the tradable set anyway.
       resolvedAutoSelectPairs: cached?.pairs.filter((p) => !DEFAULT_CORR_PAIRLIST.includes(p)),
+    });
+
+    const bootstrapUrls = await uploadTrainingBootstrap(job.id, artifacts);
+    const cloudInit = buildTrainingBootstrapCloudInit({
+      strategy: bot.strategy,
+      progressUrl: `${appUrl}/api/train/cloud/progress`,
+      callbackToken,
+      maxRuntimeHours: artifacts.maxRuntimeHours,
+      configUrl: bootstrapUrls.configUrl,
+      strategyUrl: bootstrapUrls.strategyUrl,
+      trainScriptUrl: bootstrapUrls.trainScriptUrl,
     });
 
     // Explicit markers either side of the one call that actually leaves

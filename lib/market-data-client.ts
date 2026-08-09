@@ -67,7 +67,7 @@ async function withDataSourceFallback<T>(fn: (exchange: Exchange) => Promise<T>)
 // (matching the classic VM-side download-data step's own ".*/USDT" regex
 // expansion) would mean thousands of pair/timeframe files for a cache
 // that's supposed to stay small and fast to serve.
-// buildFreqAITrainingCloudInit's resolvedAutoSelectPairs param is what
+// buildFreqAITrainingArtifacts's resolvedAutoSelectPairs param is what
 // makes this safe: the training run's pairlist gets frozen to exactly the
 // cached top-N (a StaticPairList) rather than leaving VolumePairList to
 // re-rank by volume again at backtest time, so there's no risk of the VM

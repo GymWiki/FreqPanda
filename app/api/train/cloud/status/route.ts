@@ -6,7 +6,7 @@ import { withErrorHandling } from "@/lib/api-handler";
 export const dynamic = "force-dynamic";
 
 // Freqtrade's `backtesting` command (how FreqAI training actually runs —
-// see lib/hetzner.ts buildFreqAITrainingCloudInit) has no fine-grained
+// see lib/hetzner.ts buildFreqAITrainingArtifacts) has no fine-grained
 // progress API of its own to poll or parse from stdout robustly, so this
 // endpoint blends two real signals instead of inventing a fake one:
 //  1. Which stage the VM's script last actually reported reaching (see
