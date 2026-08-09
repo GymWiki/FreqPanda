@@ -116,6 +116,17 @@ interface RefreshOneResult {
   error?: string;
 }
 
+// Safety bound on how many fetchOhlcvPage calls a single refreshOne
+// invocation will make — NOT a normal operating limit (see the pagination
+// loop's own comment below for why a genuinely stale pair/timeframe should
+// always fully catch up well before this), just a backstop against a
+// genuine infinite loop (e.g. an exchange bug that keeps echoing the same
+// cursor back). At KLINES_PAGE_LIMIT candles/page this is 2,000,000
+// candles — even at the finest cached granularity (5m) that's ~19 years,
+// vastly more than this cache will ever realistically need to catch up in
+// one run.
+const MAX_PAGES_PER_CALL = 2000;
+
 // One pair/timeframe: incremental if already cached (only fetches candles
 // since the last cached one), full backfill otherwise. Every failure is
 // caught and reported per-item rather than thrown — see
@@ -123,13 +134,40 @@ interface RefreshOneResult {
 // temporary exchange rate-limit, a delisted pair, ...) must never sink the
 // whole refresh run.
 //
-// Writes one partition file per UTC day the newly-fetched candles land on.
-// Only the FIRST day of that span might already have a same-day partition
-// from an earlier run today (or, on a boundary that happens to land
-// mid-day, from yesterday's run) — that's the one, single, small file this
-// ever downloads to merge; every later day (and every day at all during a
-// fresh backfill, since nothing has ever been written for this pair/timeframe
-// yet) is guaranteed brand new and gets written directly, no read first.
+// Writes (and upserts MarketDataCache for) one partition file per UTC day
+// the newly-fetched candles land on, flushing each day as soon as its
+// candles are known-complete (i.e. the next candle received belongs to a
+// later day) rather than accumulating the entire catch-up span in memory
+// and writing once at the end. This matters for two real reasons found
+// investigating a ~10-month-stale cache:
+//
+// 1. Pagination correctness: the previous version stopped as soon as a
+//    page came back shorter than KLINES_PAGE_LIMIT, on the assumption that
+//    a short page means "caught up to now". That's wrong for at least OKX
+//    (confirmed via the cache's own data: every pair's history froze at
+//    exactly one page's worth of candles past its backfill start,
+//    identically across pairs — e.g. 900 candles for 4h, no matter how
+//    many months have passed since). An exchange can hand back fewer
+//    candles than requested for reasons that have nothing to do with
+//    having reached the present (an internal per-call cap on its
+//    "history" endpoint, a rate-limit window, ...). The only reliable
+//    "caught up" signal is the last candle's own timestamp actually
+//    reaching nowMs — see the loop below, which now keeps paging
+//    (advancing cursor) through as many short pages as it takes, only
+//    stopping on a genuinely empty page, on reaching nowMs, or if the
+//    cursor stops advancing at all (a real dead end, not just a short
+//    page).
+// 2. Durability: fixing (1) means a single call can now legitimately need
+//    many more pages to fully catch a stale pair up — comfortably longer
+//    than refreshMarketDataCacheChunk's own deadline check, which only
+//    runs BETWEEN tasks, not mid-task (see that function's own doc
+//    comment). If this whole invocation gets hard-killed by Vercel's
+//    platform-level timeout mid-catch-up, flushing per completed day
+//    means every day already written stays written — MarketDataCache's
+//    lastCandleAt genuinely reflects how far this call got — so the next
+//    invocation resumes from there instead of the entire call's progress
+//    being lost, which is what accumulate-then-write-once-at-the-end
+//    would have done.
 async function refreshOne(
   supabase: ReturnType<typeof serviceRoleClient>,
   pair: string,
@@ -148,69 +186,80 @@ async function refreshOne(
       return { pair, timeframe, status: "skipped" };
     }
 
-    // Same paginated-fetch shape the old client-side downloader used —
-    // page forward until a short/empty page signals "caught up to now".
-    const newCandles: number[][] = [];
-    let cursor = sinceMs;
-    for (;;) {
-      const { data } = await fetchOhlcvPage(pair, timeframe, cursor, KLINES_PAGE_LIMIT);
-      const page = data.candles;
-      if (!page || page.length === 0) break;
-      for (const candle of page) if (candle[0] <= nowMs) newCandles.push(candle);
-      const lastTs = page[page.length - 1][0];
-      if (page.length < KLINES_PAGE_LIMIT || lastTs >= nowMs) break;
-      cursor = lastTs + 1;
-    }
-    if (newCandles.length === 0) {
-      return { pair, timeframe, status: "skipped" };
-    }
+    let totalNewCandles = 0;
+    // Only the very first day this call ever flushes can possibly collide
+    // with something already written (an earlier run today, or a boundary
+    // landing mid-day from yesterday's run) — see this function's own doc
+    // comment. Every later day, for the rest of this call, is guaranteed
+    // brand new since dates only move forward as candles page in.
+    let isFirstFlush = true;
+    let pendingDate: string | null = null;
+    let pendingCandles: number[][] = [];
 
-    const byDate = new Map<string, number[][]>();
-    for (const candle of newCandles) {
-      const key = dateStrUTC(candle[0]);
-      const group = byDate.get(key) ?? [];
-      group.push(candle);
-      byDate.set(key, group);
-    }
-    const dates = Array.from(byDate.keys()).sort();
-
-    for (let i = 0; i < dates.length; i++) {
-      const date = dates[i];
-      const dayCandles = byDate.get(date)!;
+    async function flushDay(date: string, dayCandles: number[][]): Promise<void> {
       const path = partitionStoragePath(DATA_SOURCE_EXCHANGE, pair, timeframe, date);
-
-      // Only the first date in an incremental run's span can possibly
-      // collide with something already written — see this function's own
-      // doc comment. Checking (and finding nothing) on a backfill or on a
-      // day that turns out to be brand new is harmless, just one extra
-      // cheap 404.
       const finalCandles =
-        i === 0 && existing ? mergeAndSort(await downloadExistingCandles(supabase, path), dayCandles) : dayCandles;
+        isFirstFlush && existing ? mergeAndSort(await downloadExistingCandles(supabase, path), dayCandles) : dayCandles;
+      isFirstFlush = false;
 
       const { error: uploadError } = await supabase.storage
         .from(MARKET_DATA_BUCKET)
         .upload(path, new Blob([JSON.stringify(finalCandles)], { type: "application/json" }), { upsert: true });
       if (uploadError) throw new Error(`Storage upload failed for ${path}: ${uploadError.message}`);
+
+      const lastCandleMs = dayCandles[dayCandles.length - 1][0];
+      await prisma.marketDataCache.upsert({
+        where: { exchange_pair_timeframe: { exchange: DATA_SOURCE_EXCHANGE, pair, timeframe } },
+        create: {
+          exchange: DATA_SOURCE_EXCHANGE,
+          pair,
+          timeframe,
+          candleCount: dayCandles.length,
+          firstCandleAt: new Date(dayCandles[0][0]),
+          lastCandleAt: new Date(lastCandleMs),
+        },
+        update: {
+          candleCount: { increment: dayCandles.length },
+          lastCandleAt: new Date(lastCandleMs),
+        },
+      });
+      totalNewCandles += dayCandles.length;
     }
 
-    const lastCandleMs = newCandles[newCandles.length - 1][0];
-    await prisma.marketDataCache.upsert({
-      where: { exchange_pair_timeframe: { exchange: DATA_SOURCE_EXCHANGE, pair, timeframe } },
-      create: {
-        exchange: DATA_SOURCE_EXCHANGE,
-        pair,
-        timeframe,
-        candleCount: newCandles.length,
-        firstCandleAt: new Date(newCandles[0][0]),
-        lastCandleAt: new Date(lastCandleMs),
-      },
-      update: {
-        candleCount: { increment: newCandles.length },
-        lastCandleAt: new Date(lastCandleMs),
-      },
-    });
+    let cursor = sinceMs;
+    for (let page = 0; page < MAX_PAGES_PER_CALL; page++) {
+      const { data } = await fetchOhlcvPage(pair, timeframe, cursor, KLINES_PAGE_LIMIT);
+      const candles = data.candles;
+      if (!candles || candles.length === 0) break; // genuinely no more data — a real end, not just a short page
 
-    return { pair, timeframe, status: "updated", newCandleCount: newCandles.length };
+      for (const candle of candles) {
+        if (candle[0] > nowMs) continue;
+        const date = dateStrUTC(candle[0]);
+        if (pendingDate !== null && date !== pendingDate) {
+          await flushDay(pendingDate, pendingCandles);
+          pendingCandles = [];
+        }
+        pendingDate = date;
+        pendingCandles.push(candle);
+      }
+
+      const lastTs = candles[candles.length - 1][0];
+      if (lastTs >= nowMs) break; // genuinely caught up
+      if (lastTs + 1 <= cursor) break; // cursor isn't advancing — a real dead end, avoid spinning forever
+      cursor = lastTs + 1;
+    }
+
+    // Whatever's left is the last (possibly still-forming) day this call
+    // reached — flush it too so this call's progress is never left
+    // dangling in memory only.
+    if (pendingDate !== null && pendingCandles.length > 0) {
+      await flushDay(pendingDate, pendingCandles);
+    }
+
+    if (totalNewCandles === 0) {
+      return { pair, timeframe, status: "skipped" };
+    }
+    return { pair, timeframe, status: "updated", newCandleCount: totalNewCandles };
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     console.error(`[market-data-cache] refresh failed for ${pair} ${timeframe}:`, err);
