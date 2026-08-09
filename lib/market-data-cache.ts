@@ -18,8 +18,23 @@ import { STRATEGY_PRESETS } from "@/lib/strategy-presets";
 // cache is never fatal — resolveCachedTrainingData just returns null, and
 // the caller falls back to the classic on-VM download-data loop exactly as
 // it worked before any of this existed.
+//
+// Storage is partitioned one file per (exchange, pair, timeframe, UTC day)
+// rather than one ever-growing file per (exchange, pair, timeframe) — the
+// single-file design's daily refresh had to download the ENTIRE existing
+// history just to append one day's worth of new candles (~221MB/day once
+// fully backfilled, ~6.6GB/month — over Supabase's free 5GB/month egress
+// tier). Per-day partitions mean a daily refresh only ever needs to
+// download the ONE partition it might be appending to (today's, if this
+// run isn't the first of the day) — everything else is a pure upload, no
+// read at all. The cost this defers to training time: a VM now has to curl
+// every partition file for its window and concatenate them locally (see
+// preloadedDataScript in lib/hetzner.ts) instead of one file per
+// pair/timeframe — more requests, but only when a user actually starts a
+// training run, not once a day regardless of usage.
 const MARKET_DATA_BUCKET = "market-data";
 const KLINES_PAGE_LIMIT = 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 // The cache is shared across every bot regardless of which strategy preset
 // it uses, so it has to cover the union of every preset's own
@@ -43,18 +58,28 @@ const BACKFILL_DAYS = Math.max(...STRATEGY_PRESETS.map((preset) => computeTraini
 // or more in a row does, which is the intended behavior, not a bug.
 const CACHE_MAX_STALENESS_HOURS = 48;
 
+// createSignedUrls' request-body/response-size limits aren't documented,
+// so chunk any batch call rather than risk one giant request for a bot
+// whose cached window spans the full BACKFILL_DAYS across several
+// timeframes — worst case a few thousand paths.
+const SIGN_URL_BATCH_SIZE = 500;
+
 function serviceRoleClient() {
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!key) throw new Error("SUPABASE_SERVICE_ROLE_KEY is not configured");
   return createServiceRoleClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, key);
 }
 
-// Matches exactly what buildFreqAITrainingCloudInit's preloadedData branch
-// (lib/hetzner.ts) expects to curl into user_data/data/<exchange>/ on the
-// VM — same filename convention as the rest of this app's freqtrade file
-// handling (see lib/freqtrade-format.ts).
-function storagePathFor(exchange: string, pair: string, timeframe: string): string {
-  return `${exchange}/${pairToFreqtradeFilename(pair)}-${timeframe}.json`;
+function dateStrUTC(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 10); // YYYY-MM-DD
+}
+
+// One file per (exchange, pair, timeframe, UTC day) — see this module's own
+// doc comment for why. Deliberately flat (no subdirectories) so a single
+// createSignedUrls batch call can address any mix of pairs/timeframes/dates
+// by path alone.
+function partitionStoragePath(exchange: string, pair: string, timeframe: string, dateStr: string): string {
+  return `${exchange}/${pairToFreqtradeFilename(pair)}-${timeframe}-${dateStr}.json`;
 }
 
 async function downloadExistingCandles(
@@ -62,7 +87,7 @@ async function downloadExistingCandles(
   path: string,
 ): Promise<number[][]> {
   const { data, error } = await supabase.storage.from(MARKET_DATA_BUCKET).download(path);
-  if (error || !data) return []; // treated as "nothing there yet" — a fresh backfill will just refetch everything from BACKFILL_DAYS ago
+  if (error || !data) return []; // treated as "nothing there yet" (a 404 for a partition that was never written, or genuinely doesn't exist yet)
   try {
     const parsed = JSON.parse(await data.text());
     return Array.isArray(parsed) ? parsed : [];
@@ -82,7 +107,7 @@ interface RefreshOneResult {
   pair: string;
   timeframe: string;
   status: "updated" | "skipped" | "error";
-  candleCount?: number;
+  newCandleCount?: number;
   error?: string;
 }
 
@@ -92,6 +117,14 @@ interface RefreshOneResult {
 // refreshMarketDataCache's own doc comment for why one bad pair (a
 // temporary exchange rate-limit, a delisted pair, ...) must never sink the
 // whole daily refresh.
+//
+// Writes one partition file per UTC day the newly-fetched candles land on.
+// Only the FIRST day of that span might already have a same-day partition
+// from an earlier run today (or, on a boundary that happens to land
+// mid-day, from yesterday's run) — that's the one, single, small file this
+// ever downloads to merge; every later day (and every day at all during a
+// fresh backfill, since nothing has ever been written for this pair/timeframe
+// yet) is guaranteed brand new and gets written directly, no read first.
 async function refreshOne(
   supabase: ReturnType<typeof serviceRoleClient>,
   pair: string,
@@ -103,19 +136,11 @@ async function refreshOne(
     });
 
     const nowMs = Date.now();
-    const path = storagePathFor(DATA_SOURCE_EXCHANGE, pair, timeframe);
-    let sinceMs: number;
-    let priorCandles: number[][] = [];
-
-    if (existing) {
-      const intervalMs = timeframeToMinutes(timeframe) * 60 * 1000;
-      sinceMs = existing.lastCandleAt.getTime() + intervalMs;
-      if (sinceMs >= nowMs) {
-        return { pair, timeframe, status: "skipped" };
-      }
-      priorCandles = await downloadExistingCandles(supabase, existing.storagePath);
-    } else {
-      sinceMs = nowMs - BACKFILL_DAYS * 24 * 60 * 60 * 1000;
+    const sinceMs = existing
+      ? existing.lastCandleAt.getTime() + timeframeToMinutes(timeframe) * 60 * 1000
+      : nowMs - BACKFILL_DAYS * DAY_MS;
+    if (sinceMs >= nowMs) {
+      return { pair, timeframe, status: "skipped" };
     }
 
     // Same paginated-fetch shape the old client-side downloader used —
@@ -131,36 +156,56 @@ async function refreshOne(
       if (page.length < KLINES_PAGE_LIMIT || lastTs >= nowMs) break;
       cursor = lastTs + 1;
     }
-
-    if (newCandles.length === 0 && priorCandles.length === 0) {
+    if (newCandles.length === 0) {
       return { pair, timeframe, status: "skipped" };
     }
 
-    const merged = mergeAndSort(priorCandles, newCandles);
-    const { error: uploadError } = await supabase.storage
-      .from(MARKET_DATA_BUCKET)
-      .upload(path, new Blob([JSON.stringify(merged)], { type: "application/json" }), { upsert: true });
-    if (uploadError) throw new Error(`Storage upload failed: ${uploadError.message}`);
+    const byDate = new Map<string, number[][]>();
+    for (const candle of newCandles) {
+      const key = dateStrUTC(candle[0]);
+      const group = byDate.get(key) ?? [];
+      group.push(candle);
+      byDate.set(key, group);
+    }
+    const dates = Array.from(byDate.keys()).sort();
 
+    for (let i = 0; i < dates.length; i++) {
+      const date = dates[i];
+      const dayCandles = byDate.get(date)!;
+      const path = partitionStoragePath(DATA_SOURCE_EXCHANGE, pair, timeframe, date);
+
+      // Only the first date in an incremental run's span can possibly
+      // collide with something already written — see this function's own
+      // doc comment. Checking (and finding nothing) on a backfill or on a
+      // day that turns out to be brand new is harmless, just one extra
+      // cheap 404.
+      const finalCandles =
+        i === 0 && existing ? mergeAndSort(await downloadExistingCandles(supabase, path), dayCandles) : dayCandles;
+
+      const { error: uploadError } = await supabase.storage
+        .from(MARKET_DATA_BUCKET)
+        .upload(path, new Blob([JSON.stringify(finalCandles)], { type: "application/json" }), { upsert: true });
+      if (uploadError) throw new Error(`Storage upload failed for ${path}: ${uploadError.message}`);
+    }
+
+    const lastCandleMs = newCandles[newCandles.length - 1][0];
     await prisma.marketDataCache.upsert({
       where: { exchange_pair_timeframe: { exchange: DATA_SOURCE_EXCHANGE, pair, timeframe } },
       create: {
         exchange: DATA_SOURCE_EXCHANGE,
         pair,
         timeframe,
-        storagePath: path,
-        candleCount: merged.length,
-        firstCandleAt: new Date(merged[0][0]),
-        lastCandleAt: new Date(merged[merged.length - 1][0]),
+        candleCount: newCandles.length,
+        firstCandleAt: new Date(newCandles[0][0]),
+        lastCandleAt: new Date(lastCandleMs),
       },
       update: {
-        candleCount: merged.length,
-        firstCandleAt: new Date(merged[0][0]),
-        lastCandleAt: new Date(merged[merged.length - 1][0]),
+        candleCount: { increment: newCandles.length },
+        lastCandleAt: new Date(lastCandleMs),
       },
     });
 
-    return { pair, timeframe, status: "updated", candleCount: merged.length };
+    return { pair, timeframe, status: "updated", newCandleCount: newCandles.length };
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     console.error(`[market-data-cache] refresh failed for ${pair} ${timeframe}:`, err);
@@ -225,7 +270,28 @@ export async function refreshMarketDataCache(): Promise<RefreshSummary> {
 export interface CachedTrainingData {
   /** Every pair with complete, fresh cached data for all requested timeframes — includes DEFAULT_CORR_PAIRLIST's correlation-only pair if present. */
   pairs: string[];
-  files: Array<{ pair: string; timeframe: string; downloadUrl: string }>;
+  /** One entry per (pair, timeframe); downloadUrls is every partition file covering that pair/timeframe's cached range, oldest first — see preloadedDataScript in lib/hetzner.ts for how the VM concatenates them back into the single file freqtrade expects. */
+  files: Array<{ pair: string; timeframe: string; downloadUrls: string[] }>;
+}
+
+async function createSignedUrlsBatched(
+  supabase: ReturnType<typeof serviceRoleClient>,
+  paths: string[],
+): Promise<Array<{ path: string | null; signedUrl: string | null; error: string | null }>> {
+  const results: Array<{ path: string | null; signedUrl: string | null; error: string | null }> = [];
+  for (let i = 0; i < paths.length; i += SIGN_URL_BATCH_SIZE) {
+    const chunk = paths.slice(i, i + SIGN_URL_BATCH_SIZE);
+    const { data, error } = await supabase.storage.from(MARKET_DATA_BUCKET).createSignedUrls(chunk, 3600);
+    if (error || !data) {
+      // Treat a whole-batch failure as "none of these signed" rather than
+      // aborting resolveCachedTrainingData outright — the caller already
+      // drops any (pair, timeframe) that ends up short a partition.
+      for (const path of chunk) results.push({ path, signedUrl: null, error: error?.message ?? "sign failed" });
+      continue;
+    }
+    results.push(...data);
+  }
+  return results;
 }
 
 // Called at training job-start (lib/train-cloud.ts) for an auto-select bot
@@ -246,40 +312,79 @@ export async function resolveCachedTrainingData(timeframes: string[]): Promise<C
   });
   if (rows.length === 0) return null;
 
-  const byPair = new Map<string, typeof rows>();
+  const rowsByPair = new Map<string, typeof rows>();
   for (const row of rows) {
-    const group = byPair.get(row.pair) ?? [];
+    const group = rowsByPair.get(row.pair) ?? [];
     group.push(row);
-    byPair.set(row.pair, group);
+    rowsByPair.set(row.pair, group);
   }
-  const usableRows = Array.from(byPair.values())
+  const usableRows = Array.from(rowsByPair.values())
     .filter((group) => group.length === timeframes.length)
     .flat();
   if (usableRows.length === 0) return null;
 
-  const supabase = serviceRoleClient();
-  const paths = usableRows.map((row) => row.storagePath);
-  const { data: signedUrls, error } = await supabase.storage.from(MARKET_DATA_BUCKET).createSignedUrls(paths, 3600);
-  if (error || !signedUrls) return null;
+  // Every calendar day between each row's own firstCandleAt/lastCandleAt is
+  // a *candidate* partition path — not every one is guaranteed to exist
+  // (an exchange gap, a newly-listed pair's actual first day, ...), so a
+  // missing one just drops out silently in the createSignedUrls pass below
+  // rather than failing the whole (pair, timeframe).
+  interface PlannedPath {
+    pair: string;
+    timeframe: string;
+    date: string;
+    path: string;
+  }
+  const planned: PlannedPath[] = [];
+  for (const row of usableRows) {
+    const startDay = Math.floor(row.firstCandleAt.getTime() / DAY_MS) * DAY_MS;
+    const endDay = Math.floor(row.lastCandleAt.getTime() / DAY_MS) * DAY_MS;
+    for (let day = startDay; day <= endDay; day += DAY_MS) {
+      const date = dateStrUTC(day);
+      planned.push({
+        pair: row.pair,
+        timeframe: row.timeframe,
+        date,
+        path: partitionStoragePath(DATA_SOURCE_EXCHANGE, row.pair, row.timeframe, date),
+      });
+    }
+  }
+  if (planned.length === 0) return null;
 
-  const byPairSigned = new Map<string, Array<{ pair: string; timeframe: string; downloadUrl: string }>>();
-  usableRows.forEach((row, i) => {
-    const entry = signedUrls[i];
-    if (!entry || entry.error || !entry.signedUrl) return;
-    const group = byPairSigned.get(row.pair) ?? [];
-    group.push({ pair: row.pair, timeframe: row.timeframe, downloadUrl: entry.signedUrl });
-    byPairSigned.set(row.pair, group);
+  const supabase = serviceRoleClient();
+  const signed = await createSignedUrlsBatched(
+    supabase,
+    planned.map((p) => p.path),
+  );
+
+  const byPairTimeframe = new Map<string, Array<{ date: string; downloadUrl: string }>>();
+  planned.forEach((p, i) => {
+    const entry = signed[i];
+    if (!entry || entry.error || !entry.signedUrl) return; // partition genuinely doesn't exist (or a batch failed) — skip it, not fatal
+    const key = `${p.pair}|${p.timeframe}`;
+    const group = byPairTimeframe.get(key) ?? [];
+    group.push({ date: p.date, downloadUrl: entry.signedUrl });
+    byPairTimeframe.set(key, group);
   });
 
-  const files = Array.from(byPairSigned.values())
+  const filesByPair = new Map<string, Array<{ pair: string; timeframe: string; downloadUrls: string[] }>>();
+  for (const [key, group] of byPairTimeframe) {
+    if (group.length === 0) continue;
+    const [pair, timeframe] = key.split("|");
+    const downloadUrls = group.sort((a, b) => a.date.localeCompare(b.date)).map((g) => g.downloadUrl);
+    const list = filesByPair.get(pair) ?? [];
+    list.push({ pair, timeframe, downloadUrls });
+    filesByPair.set(pair, list);
+  }
+
+  // Same "all-or-nothing per pair" discipline as before: a pair only
+  // counts if every requested timeframe actually got at least one signed
+  // partition URL.
+  const files = Array.from(filesByPair.values())
     .filter((group) => group.length === timeframes.length)
     .flat();
   if (files.length === 0) return null;
 
   const pairs = Array.from(new Set(files.map((f) => f.pair)));
-  // include_corr_pairlist needs this pair's data regardless of mode — a
-  // cache missing it entirely isn't usable for training at all, not just
-  // for this one pair.
   if (!DEFAULT_CORR_PAIRLIST.every((p) => pairs.includes(p))) return null;
 
   return { pairs, files };

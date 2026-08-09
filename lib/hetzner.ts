@@ -764,22 +764,29 @@ interface TrainingCloudInitParams {
    * market-data cache (Supabase Storage, kept fresh by the daily
    * POST /api/data/refresh job — see lib/market-data-cache.ts) — resolved
    * by lib/train-cloud.ts just before this VM is even created via
-   * resolveCachedTrainingData, which mints a short-lived signed Storage
-   * URL per (pair, timeframe) file. This replaces both the original
-   * VM-side download-data step AND the later client-side/Background Fetch
-   * browser download that briefly replaced it — both approaches turned
-   * out unreliable (Vercel/browser limits, exchange rate limits mid-run,
-   * huge auto-select pairlists) compared to a boring, centrally-refreshed
-   * cache the VM just curls from. When present, the entire
-   * DOWNLOADING_DATA download-data loop below is skipped in favor of just
-   * placing these files, which is also why --data-format-ohlcv json gets
-   * added to the backtesting call below only on this path: the classic
-   * download-data path still writes the freqtrade image's own default
-   * (feather), but this path writes exactly the JSON the cache stores,
-   * unconverted (see lib/market-data-cache.ts's own doc comment for why
-   * JSON rather than a literal feather/parquet writer).
+   * resolveCachedTrainingData, which mints short-lived signed Storage URLs.
+   * downloadUrls is a LIST, not a single URL: the cache is partitioned one
+   * file per (pair, timeframe, UTC day) rather than one ever-growing file
+   * per (pair, timeframe) — see lib/market-data-cache.ts's own doc comment
+   * for why (a daily refresh re-uploading the entire history just to
+   * append one day cost far more Storage egress than the free tier
+   * allows). This replaces both the original VM-side download-data step
+   * AND the later client-side/Background Fetch browser download that
+   * briefly replaced it — both turned out unreliable (Vercel/browser
+   * limits, exchange rate limits mid-run, huge auto-select pairlists)
+   * compared to a boring, centrally-refreshed cache the VM just curls
+   * from. When present, the entire DOWNLOADING_DATA download-data loop
+   * below is skipped in favor of curling every partition and concatenating
+   * them locally (via jq — see preloadedDataScript below) into the single
+   * file freqtrade actually expects, which is also why
+   * --data-format-ohlcv json gets added to the backtesting call below only
+   * on this path: the classic download-data path still writes the
+   * freqtrade image's own default (feather), but this path writes exactly
+   * the JSON the cache stores, unconverted (see lib/market-data-cache.ts's
+   * own doc comment for why JSON rather than a literal feather/parquet
+   * writer).
    */
-  preloadedData?: Array<{ pair: string; timeframe: string; downloadUrl: string }>;
+  preloadedData?: Array<{ pair: string; timeframe: string; downloadUrls: string[] }>;
   /**
    * Only meaningful together with preloadedData and autoSelectCoins — the
    * exact top-N-by-volume pairs the shared cache actually had complete,
@@ -945,33 +952,61 @@ export function buildFreqAITrainingCloudInit(params: TrainingCloudInitParams): s
   const hasPreloadedData = !!preloadedData && preloadedData.length > 0;
 
   // Runs instead of the classic download-data loop below when the shared
-  // market-data cache already has every (pair, timeframe) file this run
-  // needs (see preloadedData's own doc comment above). Each entry's
-  // downloadUrl is a short-lived signed Storage URL — curl'd straight to
-  // the exact path freqtrade's own create_datadir/_pair_data_filename (see
-  // idatahandler.py/misc.py in freqtrade's source) expects it at:
-  // user_data/data/<exchange>/<pair_s>-<timeframe>.json. <exchange> here is
-  // config.json's exchange.name, which — unlike the classic path below —
-  // this script never rewrites via jq, so it stays exactly
-  // DATA_SOURCE_EXCHANGE (trainingConfig.exchange.name's initial value
-  // above). `jq empty` is a cheap sanity check that what got downloaded is
-  // actually valid JSON (a signed URL that already expired, or a network
-  // blip mid-transfer, would otherwise only surface much later as an
-  // opaque FreqAI "no data found" failure during TRAINING instead of here).
+  // market-data cache already has every (pair, timeframe) this run needs
+  // (see preloadedData's own doc comment above). Each entry's downloadUrls
+  // is a LIST of short-lived signed Storage URLs — one per UTC-day
+  // partition (see lib/market-data-cache.ts's own doc comment for why the
+  // cache is partitioned that way) — downloaded in parallel (capped at 8
+  // concurrent, plain bash job control — no extra tooling needed beyond
+  // what's already installed) into a scratch directory, then concatenated
+  // with jq into the single file freqtrade's own
+  // create_datadir/_pair_data_filename (see idatahandler.py/misc.py in
+  // freqtrade's source) expects at:
+  // user_data/data/<exchange>/<pair_s>-<timeframe>.json. `unique_by(.[0])`
+  // (jq, sorting by the first array element — the candle timestamp) is a
+  // cheap safety net for the one boundary day a refresh run's merge step
+  // could have legitimately produced overlapping candles for, even though
+  // each partition's own JSON is already de-duplicated on write.
+  // <exchange> here is config.json's exchange.name, which — unlike the
+  // classic path below — this script never rewrites via jq, so it stays
+  // exactly DATA_SOURCE_EXCHANGE (trainingConfig.exchange.name's initial
+  // value above). Every downloaded partition is sanity-checked with
+  // `jq empty` before merging — a signed URL that already expired, or a
+  // network blip mid-transfer, would otherwise only surface much later as
+  // an opaque FreqAI "no data found" failure during TRAINING instead of
+  // here.
   const preloadedDataScript = hasPreloadedData
     ? `mkdir -p "user_data/data/${shellEscapeDouble(DATA_SOURCE_EXCHANGE)}"
 ${preloadedData!
-  .map(({ pair, timeframe, downloadUrl }) => {
+  .map(({ pair, timeframe, downloadUrls }) => {
     const destPath = `user_data/data/${DATA_SOURCE_EXCHANGE}/${pairToFreqtradeFilename(pair)}-${timeframe}.json`;
+    const tmpDir = `/tmp/preload/${pairToFreqtradeFilename(pair)}-${timeframe}`;
     const safePair = shellEscapeDouble(pair);
     const safeTimeframe = shellEscapeDouble(timeframe);
     const safeDestPath = shellEscapeDouble(destPath);
-    return `echo "=== placing preloaded data: ${safePair} ${safeTimeframe} ===" | tee -a "$TRAIN_LOG"
-curl -fsS -m 120 -o "${safeDestPath}" "${shellEscapeDouble(downloadUrl)}" || fail "failed to download preloaded data for ${safePair} ${safeTimeframe}"
-jq empty "${safeDestPath}" || fail "preloaded data file for ${safePair} ${safeTimeframe} is not valid JSON"`;
+    const safeTmpDir = shellEscapeDouble(tmpDir);
+    const urlLines = downloadUrls.map((url) => `  "${shellEscapeDouble(url)}"`).join("\n");
+    return `echo "=== placing preloaded data: ${safePair} ${safeTimeframe} (${downloadUrls.length} partition(s)) ===" | tee -a "$TRAIN_LOG"
+mkdir -p "${safeTmpDir}"
+urls=(
+${urlLines}
+)
+i=0
+for url in "\${urls[@]}"; do
+  curl -fsS -m 60 -o "${safeTmpDir}/$i.json" "$url" &
+  i=$((i+1))
+  if [ $((i % 8)) -eq 0 ]; then wait; fi
+done
+wait
+for f in "${safeTmpDir}"/*.json; do
+  [ -s "$f" ] || fail "preloaded data partition missing/empty for ${safePair} ${safeTimeframe}: $f"
+  jq empty "$f" || fail "preloaded data partition invalid JSON for ${safePair} ${safeTimeframe}: $f"
+done
+jq -s 'add | unique_by(.[0]) | sort_by(.[0])' "${safeTmpDir}"/*.json > "${safeDestPath}" || fail "failed to merge preloaded data partitions for ${safePair} ${safeTimeframe}"
+rm -rf "${safeTmpDir}"`;
   })
   .join("\n")}
-echo "=== all ${preloadedData!.length} preloaded data file(s) placed ===" | tee -a "$TRAIN_LOG"`
+echo "=== all preloaded data placed for ${preloadedData!.length} pair/timeframe combination(s) ===" | tee -a "$TRAIN_LOG"`
     : "";
 
   // Only added to the backtesting call below when preloaded data is in
