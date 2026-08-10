@@ -245,7 +245,10 @@ async function fetchOrderableServerTypes(
 // every single deploy or training run. Best-effort: if the lookup itself
 // fails (network hiccup, rate limit), falls through to the preferred
 // location unchanged — the create call's own 422 handling below is the
-// last line of defense in that case.
+// last line of defense in that case. Only used as resolveServerPlacement's
+// own last resort below, when nothing at all is orderable in the preferred
+// location — the common "type isn't available here" case is handled there
+// by changing the TYPE instead, which is what that function exists for.
 async function resolveServerLocation(serverType: string, preferredLocation: string, token: string): Promise<string> {
   let availableLocations: string[];
   try {
@@ -268,6 +271,85 @@ async function resolveServerLocation(serverType: string, preferredLocation: stri
   return fallback;
 }
 
+interface ServerPlacement {
+  serverType: string;
+  location: string;
+}
+
+// Picks BOTH the server type and location together, preferring to keep
+// HETZNER_LOCATION fixed over keeping the requested type fixed — the
+// opposite priority from the old resolveServerLocation-only approach above.
+// This matters specifically for training VMs pulling market data from the
+// permanent data server (see rsyncDataScript / buildDataServerCloudInit):
+// the whole reason that transfer is fast is both boxes sitting in the same
+// Hetzner datacenter, so a training VM silently landing in a different
+// region because its own hardcoded default type (e.g. HETZNER_TRAINING_SERVER_TYPE)
+// isn't orderable there defeats that design even though it still "works" —
+// seen in production as cpx31 training VMs landing in ash/hil (Ashburn/
+// Hillsboro, US) while the data server sits in fsn1 (Falkenstein, DE). A
+// type the operator configured is much more likely to be an arbitrary
+// size/cost pick than a location they configured is, so this treats
+// location as the harder constraint of the two.
+//
+// Common case (requested type already available in the requested location)
+// costs one /server_types + one /datacenters lookup and changes nothing —
+// same cost resolveServerLocation already paid. Falls back to
+// resolveServerLocation's old type-fixed/location-varies behavior only when
+// literally nothing orderable exists in the preferred location at all.
+async function resolveServerPlacement(
+  preferredType: string,
+  preferredLocation: string,
+  token: string,
+): Promise<ServerPlacement> {
+  let server_types: Array<{ id: number; name: string; cores: number; memory: number; cpu_type: string; deprecation: unknown }>;
+  let datacenters: Array<{ location: { name: string }; server_types: { available: number[] } }>;
+  try {
+    const typeRes = await hetznerFetch(`/server_types`, { headers: { Authorization: `Bearer ${token}` } });
+    if (!typeRes.ok) throw new Error(`Hetzner API error (${typeRes.status}): ${await typeRes.text()}`);
+    ({ server_types } = await typeRes.json());
+
+    const dcRes = await hetznerFetch(`/datacenters`, { headers: { Authorization: `Bearer ${token}` } });
+    if (!dcRes.ok) throw new Error(`Hetzner API error (${dcRes.status}): ${await dcRes.text()}`);
+    ({ datacenters } = await dcRes.json());
+  } catch (err) {
+    console.error(`[hetzner] Could not look up server type/location availability:`, err);
+    return { serverType: preferredType, location: preferredLocation };
+  }
+
+  const preferred = server_types.find((t) => t.name === preferredType);
+  const dc = datacenters.find((d) => d.location.name === preferredLocation);
+
+  if (preferred && dc && dc.server_types.available.includes(preferred.id)) {
+    return { serverType: preferredType, location: preferredLocation };
+  }
+
+  if (dc) {
+    const availableInLocation = server_types.filter((t) => !t.deprecation && dc.server_types.available.includes(t.id));
+    if (availableInLocation.length > 0) {
+      const best =
+        (preferred &&
+          availableInLocation
+            .filter((t) => t.cpu_type === preferred.cpu_type)
+            .sort(
+              (a, b) => Math.abs(a.cores - preferred.cores) - Math.abs(b.cores - preferred.cores) || a.memory - b.memory,
+            )[0]) ||
+        availableInLocation.filter((t) => t.cpu_type === "shared").sort((a, b) => a.cores - b.cores || a.memory - b.memory)[0] ||
+        availableInLocation[0];
+      console.warn(
+        `[hetzner] Server type "${preferredType}" is not orderable in "${preferredLocation}" — using "${best.name}" ` +
+          `there instead, keeping the location fixed (see resolveServerPlacement's own doc comment for why).`,
+      );
+      return { serverType: best.name, location: preferredLocation };
+    }
+  }
+
+  // Nothing at all orderable in preferredLocation (or it doesn't exist) —
+  // fall back to the old type-fixed/location-varies behavior as a last
+  // resort, same as before this function existed.
+  const location = await resolveServerLocation(preferredType, preferredLocation, token);
+  return { serverType: preferredType, location };
+}
+
 // allowDeprecatedFallback: internal-only, set to false on the one retry
 // createHetznerServer below makes for itself — prevents an infinite loop if
 // Hetzner's own /server_types listing were ever inconsistent with what
@@ -280,9 +362,13 @@ async function createHetznerServerOnce(
 ): Promise<HetznerServerResponse> {
   const firewallId = firewallProfile ? await ensureFirewall(firewallProfile) : undefined;
 
-  const resolvedServerType = serverType || process.env.HETZNER_SERVER_TYPE || "cx11";
+  const preferredServerType = serverType || process.env.HETZNER_SERVER_TYPE || "cx11";
   const preferredLocation = process.env.HETZNER_LOCATION || "nbg1";
-  const location = await resolveServerLocation(resolvedServerType, preferredLocation, token);
+  const { serverType: resolvedServerType, location } = await resolveServerPlacement(
+    preferredServerType,
+    preferredLocation,
+    token,
+  );
 
   const res = await hetznerFetch(`/servers`, {
     method: "POST",
@@ -306,7 +392,7 @@ async function createHetznerServerOnce(
     const errorBody = await res.text();
     // Translate the specific "type not orderable in this location" 422
     // into something actionable instead of raw Hetzner JSON — this can
-    // still happen even after resolveServerLocation above (e.g. the
+    // still happen even after resolveServerPlacement above (e.g. the
     // lookup itself failed and fell through, or Hetzner's catalog changed
     // mid-request), so it's a real fallback, not dead code.
     if (res.status === 422 && errorBody.includes("unsupported location for server type")) {
