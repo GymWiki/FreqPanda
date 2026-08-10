@@ -1,13 +1,17 @@
 import { prisma } from "@/lib/prisma";
 import type { Prisma } from "@prisma/client";
 import { decrypt } from "@/lib/encryption";
-import { buildFreqAITrainingArtifacts, buildTrainingBootstrapCloudInit, createHetznerServer, requireHetznerToken } from "@/lib/hetzner";
+import {
+  buildFreqAITrainingArtifacts,
+  buildTrainingBootstrapCloudInit,
+  createHetznerServer,
+  requireHetznerToken,
+  getDataServerConfig,
+} from "@/lib/hetzner";
 import { DEFAULT_PAPER_TOTAL_BUDGET, DEFAULT_PAPER_MAX_STAKE_PERCENTAGE } from "@/lib/paper-trading-defaults";
 import { generateCallbackToken, hashCallbackToken } from "@/lib/training-token";
 import { stopBot, forceExitAll } from "@/lib/freqtrade-client";
-import { selectTrainablePairs, MIN_TRAINABLE_PAIRS } from "@/lib/market-data-cache";
 import { uploadTrainingBootstrap } from "@/lib/training-bootstrap";
-import { DEFAULT_CORR_PAIRLIST } from "@/lib/training-timerange";
 import type { FreqAIProfileConfig } from "@/lib/strategy-presets";
 
 type BotRow = Prisma.BotConfigurationGetPayload<object>;
@@ -15,19 +19,6 @@ type BotRow = Prisma.BotConfigurationGetPayload<object>;
 const TRAINING_SERVER_TYPE = process.env.HETZNER_TRAINING_SERVER_TYPE || "cpx31";
 
 export class TrainingBusyError extends Error {}
-
-// Thrown (and caught by POST /api/train/cloud) when an auto-select bot's
-// shared market-data cache doesn't have enough fresh, complete pairs to
-// run a meaningful training run right now — see selectTrainablePairs in
-// lib/market-data-cache.ts for the actual policy. Deliberately checked
-// BEFORE pausing a currently-deployed bot or creating any TrainingJob row
-// (see this function's own call site below): a rejected run shouldn't
-// interrupt live/paper trading, and a run that never really started
-// doesn't belong in this bot's training history. Message is meant to be
-// shown to the user as-is — a clear, actionable reason instead of the
-// cryptic freqtrade "No data found. Terminating." stack trace this
-// replaces.
-export class TrainingDataNotReadyError extends Error {}
 
 interface StartCloudTrainingParams {
   bot: BotRow;
@@ -63,20 +54,15 @@ export async function startCloudTrainingJob({ bot, cancelOpenOrders = false }: S
 
   const freqaiConfig = bot.freqaiConfig as unknown as FreqAIProfileConfig;
 
-  // Only auto-select bots use the shared cache — a manual/static
-  // pairWhitelist can be any pair at all, not necessarily one of the
-  // top-N-by-volume pairs the cache actually stores, so those keep using
-  // the classic on-VM download-data loop unchanged, with no readiness
-  // gate at all (see selectTrainablePairs' own doc comment). Resolved once
-  // here, checked BEFORE anything else below has any real-world effect —
-  // see TrainingDataNotReadyError's own doc comment for why.
-  const trainablePairs = bot.autoSelectCoins ? await selectTrainablePairs(freqaiConfig.features.includeTimeframes) : null;
-  if (trainablePairs && !trainablePairs.ready) {
-    const message = trainablePairs.missingCorrPair
-      ? `Nog te weinig actuele marktdata: de referentie-pair ${DEFAULT_CORR_PAIRLIST[0]} is nog niet volledig bijgewerkt. De achtergrond-refresh werkt hier automatisch aan door — probeer het over een paar uur opnieuw.`
-      : `Nog te weinig actuele paren: ${trainablePairs.readyPairCount}/${trainablePairs.targetPairCount} klaar (minimaal ${MIN_TRAINABLE_PAIRS} nodig). De achtergrond-refresh werkt de resterende paren geleidelijk bij — probeer het over een paar uur opnieuw.`;
-    throw new TrainingDataNotReadyError(message);
-  }
+  // Only meaningful for auto-select bots — a manual/static pairWhitelist can
+  // be any pair at all, not necessarily one the permanent data server
+  // happens to have downloaded, so those always use the classic on-VM
+  // download-data loop inside buildFreqAITrainingArtifacts regardless of
+  // whether this is configured. Returns null (no throw) when either env var
+  // is unset, so a training run for an auto-select bot still works — just
+  // via the classic loop — before DATA_SERVER_HOST/DATA_SERVER_SSH_PRIVATE_KEY
+  // are ever set. See getDataServerConfig's own doc comment in lib/hetzner.ts.
+  const dataServer = getDataServerConfig();
 
   // Priority rule: training/updating always wins over active trading
   // (paper or live), and the pause must be real, not just a status label —
@@ -116,21 +102,6 @@ export async function startCloudTrainingJob({ bot, cancelOpenOrders = false }: S
     data: { status: wasDeployed ? "UPDATING_MODEL" : "TRAINING", trainingMode: "CLOUD" },
   });
 
-  // Tradable pairlist, not the download list: trainablePairs.pairs includes
-  // DEFAULT_CORR_PAIRLIST's correlation-only pair (needed for
-  // feature_engineering, never meant to be auto-tradable on its own
-  // merits) alongside the real top-N-by-volume pairs — subtracted here so
-  // this run's stored history reflects exactly what got traded, matching
-  // resolvedAutoSelectPairs below. null for a manual bot (this whole
-  // concept doesn't apply) or when trainablePairs is null.
-  const trainedPairs = trainablePairs
-    ? trainablePairs.pairs.filter((p) => !DEFAULT_CORR_PAIRLIST.includes(p)).join(",")
-    : null;
-  // Every pair the cache is tracking at all for this bot's timeframes,
-  // ready or not — lets the UI show which specific pairs were excluded
-  // from trainedPairs, not just how many.
-  const candidatePairs = trainablePairs ? trainablePairs.candidatePairs.join(",") : null;
-
   const callbackToken = generateCallbackToken();
   const job = await prisma.trainingJob.create({
     data: {
@@ -139,27 +110,18 @@ export async function startCloudTrainingJob({ bot, cancelOpenOrders = false }: S
       mode: "CLOUD",
       status: "QUEUED",
       callbackTokenHash: hashCallbackToken(callbackToken),
-      trainedPairs,
-      candidatePairs,
     },
   });
 
   try {
-    // Guaranteed ready (or null for a manual bot) — an auto-select bot
-    // whose cache wasn't ready already threw TrainingDataNotReadyError
-    // above, before this job row even existed.
-    const cached = trainablePairs;
-
     // Split in two: buildFreqAITrainingArtifacts is pure (config.json, the
-    // strategy source, train.sh — the latter potentially several MB once a
-    // fully-backfilled auto-select cache's signed partition URLs are
-    // embedded in it, see preloadedData's own doc comment), then
-    // uploadTrainingBootstrap ships those three to the private
-    // "training-bootstrap" Storage bucket so the actual user_data handed to
-    // Hetzner (buildTrainingBootstrapCloudInit) only has to carry three
-    // short signed URLs — comfortably under Hetzner's 32768-byte user_data
-    // limit regardless of how big train.sh itself gets. See
-    // lib/training-bootstrap.ts's own doc comment for the full reasoning.
+    // strategy source, train.sh), then uploadTrainingBootstrap ships those
+    // three to the private "training-bootstrap" Storage bucket so the
+    // actual user_data handed to Hetzner (buildTrainingBootstrapCloudInit)
+    // only has to carry three short signed URLs — comfortably under
+    // Hetzner's 32768-byte user_data limit regardless of how big train.sh
+    // itself gets. See lib/training-bootstrap.ts's own doc comment for the
+    // full reasoning.
     const artifacts = buildFreqAITrainingArtifacts({
       botName: bot.botName,
       exchangeName: bot.exchangeName,
@@ -176,17 +138,13 @@ export async function startCloudTrainingJob({ bot, cancelOpenOrders = false }: S
       progressUrl: `${appUrl}/api/train/cloud/progress`,
       callbackToken,
       hetznerApiToken,
-      preloadedData: cached?.files,
-      // Trading pairlist, not the download list: cached.pairs includes
-      // DEFAULT_CORR_PAIRLIST's correlation-only pair (needed for
-      // feature_engineering, never meant to be auto-tradable on its own
-      // merits) alongside the real top-N-by-volume pairs — subtracted
-      // here so a StaticPairList built from this never trades a pair that
-      // was only ever fetched for correlation data. In virtually every
-      // real case that pair is ALSO organically top-volume already (BTC
-      // dominates volume on any real exchange), so this rarely actually
-      // excludes anything that belonged in the tradable set anyway.
-      resolvedAutoSelectPairs: cached?.pairs.filter((p) => !DEFAULT_CORR_PAIRLIST.includes(p)),
+      // Only ever set for an auto-select bot with a configured data server
+      // (see dataServer's own comment above) — buildFreqAITrainingArtifacts
+      // falls back to the classic on-VM download-data loop for everything
+      // else (manual pairWhitelist bots, or before these two env vars are
+      // set at all).
+      dataServerHost: bot.autoSelectCoins ? dataServer?.host : undefined,
+      dataServerSshPrivateKey: bot.autoSelectCoins ? dataServer?.sshPrivateKey : undefined,
     });
 
     const bootstrapUrls = await uploadTrainingBootstrap(job.id, artifacts);

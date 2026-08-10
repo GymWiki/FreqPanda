@@ -248,12 +248,10 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
   // Mode B (cloud): fire-and-forget — the VM reports back on its own via
   // /api/train/cloud/callback. BotFleetGrid polls while a job is active and
   // will push the updated status into this card's props. Historical market
-  // data is no longer fetched client-side (that approach — first in the
-  // browser directly, then via Background Fetch — turned out unreliable
-  // across browsers and network conditions); the VM now pulls a
-  // server-maintained, daily-refreshed cache from Supabase Storage at boot
-  // (see lib/hetzner.ts's preloadedData handling and app/api/data/refresh),
-  // so this click is simple again: just start the job.
+  // data is no longer fetched client-side at all — for an auto-select bot,
+  // the VM rsyncs it directly from the permanent data server over SSH (see
+  // rsyncDataScript / buildDataServerCloudInit in lib/hetzner.ts) — so this
+  // click is simple again: just start the job.
   async function handleStartCloudTraining() {
     setError(null);
     setIsStartingCloudTraining(true);
@@ -275,11 +273,6 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
           mode: "CLOUD",
           errorMessage: null,
           createdAt: data.job.createdAt,
-          // Real values arrive on the next actual fetch (BotFleetGrid's
-          // poll or a page refresh) — this optimistic update just needs to
-          // satisfy the DTO shape in the meantime.
-          trainedPairs: null,
-          candidatePairs: null,
         },
       });
       // Only reachable once the call above actually succeeded — a click
@@ -636,17 +629,6 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
                 {bot.latestTrainingJob.errorMessage}
               </p>
             )}
-            {/* Only present for an auto-select bot's cache-driven run — see
-                selectTrainablePairs in lib/market-data-cache.ts. Makes the
-                exclusion of a still-catching-up pair a visible, deliberate
-                choice for this run rather than something that looks like a
-                bug when a user notices a pair missing from the pairlist. */}
-            {bot.latestTrainingJob.trainedPairs && bot.latestTrainingJob.candidatePairs && (
-              <PairlistSummary
-                trainedPairs={bot.latestTrainingJob.trainedPairs}
-                candidatePairs={bot.latestTrainingJob.candidatePairs}
-              />
-            )}
           </div>
         )}
 
@@ -820,40 +802,5 @@ function CredentialRow({ label, value, field, copied, onCopy }: CredentialRowPro
         {copied ? <Check className="h-3 w-3 text-primary" /> : <Copy className="h-3 w-3" />}
       </button>
     </div>
-  );
-}
-
-interface PairlistSummaryProps {
-  trainedPairs: string[];
-  candidatePairs: string[];
-}
-
-// Shows which pairs an auto-select bot's last cache-driven training run
-// actually traded, and which candidate pairs sat this run out because
-// their cached data wasn't fresh/complete enough yet (see
-// selectTrainablePairs in lib/market-data-cache.ts) — so a user who
-// notices a pair missing from the pairlist sees a deliberate, explained
-// choice instead of something that looks like a bug.
-function PairlistSummary({ trainedPairs, candidatePairs }: PairlistSummaryProps) {
-  const excluded = candidatePairs.filter((p) => !trainedPairs.includes(p));
-  const total = trainedPairs.length + excluded.length;
-
-  return (
-    <details className="text-[11px] text-slate-400">
-      <summary className="cursor-pointer select-none text-slate-300">
-        Pairlist: {trainedPairs.length}/{total} paren gebruikt
-        {excluded.length > 0 && ` · ${excluded.length} overgeslagen`}
-      </summary>
-      <div className="mt-1.5 space-y-1 pl-2">
-        <p>
-          <span className="text-slate-500">Gebruikt:</span> {trainedPairs.join(", ") || "geen"}
-        </p>
-        {excluded.length > 0 && (
-          <p>
-            <span className="text-slate-500">Nog niet actueel (overgeslagen):</span> {excluded.join(", ")}
-          </p>
-        )}
-      </div>
-    </details>
   );
 }

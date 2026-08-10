@@ -2,15 +2,15 @@ import { createClient as createServiceRoleClient } from "@supabase/supabase-js";
 
 // Hetzner hard-caps a server's user_data at 32768 bytes (the 422 "Length
 // must be between 0 and 32768" error this module exists to prevent) — fine
-// for the cloud-init this app used to inline directly, but not once
-// preloadedDataScript (lib/hetzner.ts) started embedding a signed Storage
-// URL per cached day-partition: a fully-backfilled auto-select bot's
-// training script alone can carry tens of thousands of those, pushing the
-// whole user_data payload into multiple MB. Storage has no such limit, so
-// the actual training artifacts (config.json, the strategy source, and the
-// train.sh script — see buildFreqAITrainingArtifacts) are uploaded here
-// instead, and the VM's user_data becomes a short bootstrap that curls them
-// down after boot (see buildTrainingBootstrapCloudInit).
+// for the cloud-init this app used to inline directly, but not once the
+// generated train.sh (strategy source, config.json, and — for an
+// auto-select bot with a permanent data server configured — the embedded
+// SSH private key and rsync script, see buildFreqAITrainingArtifacts in
+// lib/hetzner.ts) started pushing close to that limit. Storage has no such
+// limit, so the actual training artifacts (config.json, the strategy
+// source, and the train.sh script) are uploaded here instead, and the VM's
+// user_data becomes a short bootstrap that curls them down after boot (see
+// buildTrainingBootstrapCloudInit).
 const TRAINING_BOOTSTRAP_BUCKET = "training-bootstrap";
 
 // Generous relative to how long this actually needs to live: the VM fetches

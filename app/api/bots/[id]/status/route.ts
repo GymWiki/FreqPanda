@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { decrypt } from "@/lib/encryption";
 import { extractBearerToken, hashCallbackToken, timingSafeEqualHex } from "@/lib/training-token";
 import { startBot, stopBot } from "@/lib/freqtrade-client";
-import { startCloudTrainingJob, TrainingBusyError, TrainingDataNotReadyError } from "@/lib/train-cloud";
+import { startCloudTrainingJob, TrainingBusyError } from "@/lib/train-cloud";
 import { withErrorHandling, parseJsonBody } from "@/lib/api-handler";
 
 export const dynamic = "force-dynamic";
@@ -109,13 +109,6 @@ export const POST = withErrorHandling(async (req: NextRequest, { params }: { par
       } catch (err) {
         if (err instanceof TrainingBusyError) {
           return NextResponse.json({ error: err.message }, { status: 409 });
-        }
-        if (err instanceof TrainingDataNotReadyError) {
-          // Expected, not an error worth logging — the deployed bot stays
-          // exactly as it was (never paused, since this throws before
-          // startCloudTrainingJob touches anything) and can retry the
-          // retrain_needed event later once the cache has caught up more.
-          return NextResponse.json({ error: err.message }, { status: 503 });
         }
         console.error(`[bots/status] Failed to start retrain for bot ${bot.id}:`, err);
         const errMessage = err instanceof Error ? err.message : "Failed to start retrain";

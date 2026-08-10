@@ -143,12 +143,6 @@ export const GET = withErrorHandling(async (req: NextRequest) => {
     return NextResponse.json({ error: "Training job not found" }, { status: 404 });
   }
 
-  // Same comma-separated-string convention as BotConfiguration.pairWhitelist
-  // — see TrainingJob.trainedPairs/candidatePairs' own doc comment in
-  // prisma/schema.prisma. Both null for a manual/static pairWhitelist bot.
-  const trainedPairs = job.trainedPairs ? job.trainedPairs.split(",").filter(Boolean) : null;
-  const candidatePairs = job.candidatePairs ? job.candidatePairs.split(",").filter(Boolean) : null;
-
   if (job.status === "COMPLETED") {
     return NextResponse.json({
       jobId: job.id,
@@ -158,8 +152,6 @@ export const GET = withErrorHandling(async (req: NextRequest) => {
       elapsedSeconds: Math.round((job.updatedAt.getTime() - job.createdAt.getTime()) / 1000),
       estimatedRemainingSeconds: 0,
       errorMessage: null,
-      trainedPairs,
-      candidatePairs,
     });
   }
 
@@ -186,8 +178,6 @@ export const GET = withErrorHandling(async (req: NextRequest) => {
       elapsedSeconds,
       estimatedRemainingSeconds: null,
       errorMessage: job.errorMessage,
-      trainedPairs,
-      candidatePairs,
     });
   }
 
@@ -207,7 +197,5 @@ export const GET = withErrorHandling(async (req: NextRequest) => {
     elapsedSeconds,
     estimatedRemainingSeconds,
     errorMessage: null,
-    trainedPairs,
-    candidatePairs,
   });
 });

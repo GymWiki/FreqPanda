@@ -22,10 +22,6 @@ export interface TrainingJobDTO {
   mode: TrainingMode;
   errorMessage: string | null;
   createdAt: string | Date;
-  /** Pairs this run actually traded (the StaticPairList frozen from the shared cache) — null for a manual/static pairWhitelist bot or a run that never reached job creation (see selectTrainablePairs in lib/market-data-cache.ts). */
-  trainedPairs: string[] | null;
-  /** Every pair the cache was tracking at job-start, ready or not — trainedPairs minus this set is what got excluded from this run. Same nullability as trainedPairs. */
-  candidatePairs: string[] | null;
 }
 
 export interface ExchangeConnectionDTO {

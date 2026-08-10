@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { createClient } from "@/lib/supabase/server";
 import { prisma } from "@/lib/prisma";
-import { startCloudTrainingJob, TrainingBusyError, TrainingDataNotReadyError } from "@/lib/train-cloud";
+import { startCloudTrainingJob, TrainingBusyError } from "@/lib/train-cloud";
 import { withErrorHandling, parseJsonBody } from "@/lib/api-handler";
 
 export const dynamic = "force-dynamic";
@@ -42,23 +42,15 @@ export const POST = withErrorHandling(async (req: NextRequest) => {
   try {
     // If the bot is currently deployed (paper or live), this genuinely
     // pauses it via its own freqtrade API first — training/updating always
-    // takes priority. See lib/train-cloud.ts. Historical market data is no
-    // longer fetched here or on the VM itself — lib/train-cloud.ts pulls
-    // whatever's usable from the server-maintained cache (see
-    // lib/market-data-cache.ts) at job-start, falling back to the VM's own
-    // classic download-data step when the cache isn't usable.
+    // takes priority. See lib/train-cloud.ts. Historical market data comes
+    // either from the permanent data server (rsync, auto-select bots only —
+    // see getDataServerConfig in lib/hetzner.ts) or the VM's own classic
+    // download-data step.
     const job = await startCloudTrainingJob({ bot, cancelOpenOrders });
     return NextResponse.json({ job }, { status: 201 });
   } catch (err) {
     if (err instanceof TrainingBusyError) {
       return NextResponse.json({ error: err.message }, { status: 409 });
-    }
-    if (err instanceof TrainingDataNotReadyError) {
-      // 503, not 502/500 — this isn't a failure of anything, it's an
-      // accurate "come back later" signal while the background refresh
-      // catches the rest of the pairlist up (see selectTrainablePairs in
-      // lib/market-data-cache.ts).
-      return NextResponse.json({ error: err.message }, { status: 503 });
     }
     console.error(`[train/cloud] Failed to start cloud training for bot ${bot.id}:`, err);
     const message = err instanceof Error ? err.message : "Failed to start cloud training";

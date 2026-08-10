@@ -1,13 +1,13 @@
 import { isSafePythonIdentifier } from "@/lib/strategy-validation";
-import type { FreqAIProfileConfig } from "@/lib/strategy-presets";
+import { STRATEGY_PRESETS, type FreqAIProfileConfig } from "@/lib/strategy-presets";
 import { EXCHANGE_PRESETS } from "@/lib/exchange-presets";
 import {
   computeTrainingTimerangeDays,
   computeTrainingTimerange,
+  timeframeToMinutes,
   STAKE_CURRENCY,
   DEFAULT_CORR_PAIRLIST,
 } from "@/lib/training-timerange";
-import { pairToFreqtradeFilename } from "@/lib/freqtrade-format";
 
 // Re-exported so every existing "@/lib/hetzner" import of these keeps
 // working unchanged — see training-timerange.ts's own doc comment for why
@@ -78,13 +78,21 @@ async function hetznerFetch(path: string, init: RequestInit = {}): Promise<Respo
   }
 }
 
-type FirewallProfile = "live-trading" | "training";
+type FirewallProfile = "live-trading" | "training" | "data-server";
 
 // Creates (or reuses) a Hetzner Cloud Firewall for the given profile and
 // returns its id. "live-trading" opens only what a deployed bot actually
 // needs (the freqtrade REST API, plus SSH only if a key is configured);
 // "training" opens nothing at all — the ephemeral training VM never
-// listens on any port, it only makes outbound calls.
+// listens on any port, it only makes outbound calls (including the rsync
+// pull FROM the data server below — that's this VM connecting OUT, not
+// something it needs to accept inbound). "data-server" is the one
+// permanent box in this whole setup and opens only SSH — see
+// buildDataServerCloudInit's own doc comment for why key-only auth over
+// the public internet (same trade-off "live-trading" already makes for
+// its own optional admin SSH) is an acceptable, deliberately simple
+// choice here rather than standing up a private network for a single
+// always-on box serving nothing but public market data.
 async function ensureFirewall(profile: FirewallProfile): Promise<number> {
   const token = requireHetznerToken();
   const name = `freqtrade-command-center-${profile}`;
@@ -98,6 +106,14 @@ async function ensureFirewall(profile: FirewallProfile): Promise<number> {
   const { firewalls } = (await listRes.json()) as { firewalls: Array<{ id: number }> };
   if (firewalls?.[0]?.id) return firewalls[0].id;
 
+  const sshRule = {
+    direction: "in",
+    protocol: "tcp",
+    port: "22",
+    source_ips: ["0.0.0.0/0", "::/0"],
+    description: "SSH (key-only auth)",
+  };
+
   const rules =
     profile === "live-trading"
       ? [
@@ -108,19 +124,11 @@ async function ensureFirewall(profile: FirewallProfile): Promise<number> {
             source_ips: ["0.0.0.0/0", "::/0"],
             description: "Freqtrade REST API / FreqUI",
           },
-          ...(process.env.HETZNER_SSH_KEY_ID
-            ? [
-                {
-                  direction: "in",
-                  protocol: "tcp",
-                  port: "22",
-                  source_ips: ["0.0.0.0/0", "::/0"],
-                  description: "SSH (key-only auth)",
-                },
-              ]
-            : []),
+          ...(process.env.HETZNER_SSH_KEY_ID ? [sshRule] : []),
         ]
-      : [];
+      : profile === "data-server"
+        ? [sshRule]
+        : [];
 
   const createRes = await hetznerFetch(`/firewalls`, {
     method: "POST",
@@ -343,10 +351,10 @@ function writeFilesBlock(entries: Array<{ path: string; content: string; permiss
 // lib/training-timerange.ts and are re-exported above. DEFAULT_CORR_PAIRLIST
 // backs FreqAI's required include_corr_pairlist config key
 // (freqtrade/config_schema/config_schema.py — a MISSING key fails config
-// validation outright, unlike an empty list) and, since that export, also
-// lib/market-data-cache.ts's own cached-pairlist union — otherwise a
-// preloaded-data training run would silently be missing the one pair every
-// FreqAI feature set actually depends on.
+// validation outright, unlike an empty list) and also the permanent data
+// server's own download-pairs union (see buildDataServerCloudInit below) —
+// otherwise a run using that server's data would silently be missing the
+// one pair every FreqAI feature set actually depends on.
 
 // The exchange whose PUBLIC market data (download-data/backtesting) every
 // FreqAI training run actually reads candles from — deliberately NOT the
@@ -370,15 +378,265 @@ function writeFilesBlock(entries: Array<{ path: string; content: string; permiss
 // MiCA licence, deep USDT pairs) and Gate.io (Malta CASP authorization,
 // also deep USDT pairs) are both confirmed still serving the EEA normally.
 // If either ever has its own outage/block, change these two constants —
-// every training run picks it up on its next run, no per-bot migration.
-// Exported so lib/market-data-client.ts (used both by lib/market-data-cache.ts's
-// daily refresh job and the VM-side classic download-data fallback below)
-// fetches candles/markets from exactly these same two exchanges, in the
-// same order, rather than risking a second, separately hardcoded copy
-// drifting out of sync with this one.
+// every training run and the data server's own daily cron (see
+// buildDataServerCloudInit) pick it up on their next run, no per-bot
+// migration.
 export const DATA_SOURCE_EXCHANGE = "okx";
 export const DATA_SOURCE_EXCHANGE_FALLBACK = "gate";
 export const DATA_SOURCE_EXCHANGES = [DATA_SOURCE_EXCHANGE, DATA_SOURCE_EXCHANGE_FALLBACK];
+
+// Dedicated, low-privilege account on the permanent data server — never
+// root, and its authorized_keys entry (see buildDataServerCloudInit) is
+// restricted to rsync's own `rrsync` wrapper in read-only mode, so even a
+// leaked training-VM private key only ever unlocks read access to the
+// downloaded market data, nothing else on that box.
+export const DATA_SERVER_SSH_USER = "datasync";
+
+export interface DataServerConfig {
+  host: string;
+  sshPrivateKey: string;
+}
+
+// Both env vars are set once, by hand, after running
+// scripts/provision-data-server.ts (see that script's own doc comment) —
+// there's no way to know the server's IP or mint its trusted key pair from
+// inside a Vercel request. Returns null (never throws) when either is
+// missing, exactly like the old resolveCachedTrainingData did for an
+// unusable cache: lib/train-cloud.ts falls back to the classic on-VM
+// download-data loop below rather than failing a training run outright —
+// this whole feature is additive, not a hard requirement to run the app.
+export function getDataServerConfig(): DataServerConfig | null {
+  const host = process.env.DATA_SERVER_HOST;
+  const sshPrivateKey = process.env.DATA_SERVER_SSH_PRIVATE_KEY;
+  if (!host || !sshPrivateKey) return null;
+  return { host, sshPrivateKey };
+}
+
+// Public half of the dedicated ed25519 keypair every training VM uses to
+// reach the data server (see rsyncDataScript below for the private half's
+// own doc comment, and DataServerConfig.sshPrivateKey above for where that
+// half actually comes from — DATA_SERVER_SSH_PRIVATE_KEY, never this file).
+// Safe to hardcode: it's a public key, and the account it's trusted by
+// (DATA_SERVER_SSH_USER) can only ever run one restricted command anyway
+// (see the authorized_keys entry in buildDataServerCloudInit below).
+const DATA_SERVER_TRUSTED_PUBLIC_KEY =
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDqbEwpkia/KRcsteyWz/0QtE9zYFNtZL7r/D6jaVwuC freqtrade-training-vm-to-dataserver";
+
+// Both DATA_SERVER_SSH_USER's $HOME and the directory rrsync is restricted
+// to below — also what rsyncDataScript's relative paths ("user_data/data/...",
+// "pairlist.json") resolve against once rrsync chdir's into it. Changing
+// this constant alone (without also updating a live server) would break
+// every training VM's rsync pull, so it isn't meant to ever change.
+const DATA_SERVER_HOME_DIR = "/opt/freqdata";
+
+// Cloud-init for the one permanent, always-on box this whole platform
+// provisions — every other Hetzner server this app creates (live-trading
+// deploys via buildFreqtradeCloudInit, training VMs via
+// buildFreqAITrainingArtifacts) is ephemeral, torn down right after a
+// single job. This one runs freqtrade's own `download-data` on a plain
+// system cron, once a day, and just keeps a normal, standard-format
+// freqtrade data directory on disk — ephemeral training VMs rsync from it
+// (see rsyncDataScript in buildFreqAITrainingArtifacts above) instead of
+// each independently re-downloading the same candles from the exchange.
+//
+// This replaces the old Supabase-Storage-backed cache
+// (lib/market-data-cache.ts, deleted) outright. That design's entire
+// complexity — day-partitioned chunks, a shuffled task queue, a starvation
+// fix, a training-readiness gate — existed to work around ONE constraint:
+// a Vercel serverless function can't stay running for hours. A real,
+// always-on server has no such limit, so none of that was actually
+// necessary to solve the underlying problem ("keep a rolling window of
+// candles on hand") — it's just freqtrade's own documented workflow
+// (`download-data` on a cron), run on a box that can actually run it
+// uninterrupted.
+//
+// Provisioned once, by hand, via scripts/provision-data-server.ts — not
+// through the normal bot-deploy/training request flow, since nothing about
+// "stand up the one permanent data server" is a per-request operation.
+export function buildDataServerCloudInit(): string {
+  // Reuses the exact same VolumePairList spec a real auto-select bot gets
+  // (see buildPairlistConfig) — this server's own top-AUTO_PAIRLIST_SIZE
+  // resolution is meant to be identical to what a bot would ask for, not a
+  // separately-maintained approximation of it.
+  const pairlistConfig = buildPairlistConfig(true, []);
+
+  const timeframes = Array.from(
+    new Set(
+      STRATEGY_PRESETS.flatMap((preset) => [
+        preset.freqaiConfig.features.baseTimeframe,
+        ...preset.freqaiConfig.features.includeTimeframes,
+      ]),
+    ),
+  ).sort((a, b) => timeframeToMinutes(a) - timeframeToMinutes(b));
+
+  // Max across every strategy preset's own computeTrainingTimerangeDays
+  // (lib/training-timerange.ts) — this server keeps enough history for
+  // whichever preset a given bot ends up using, not just one of them.
+  const backfillDays = Math.max(
+    ...STRATEGY_PRESETS.map((preset) => computeTrainingTimerangeDays(preset.freqaiConfig)),
+  );
+
+  const dataServerConfig = {
+    exchange: {
+      name: DATA_SOURCE_EXCHANGE,
+      key: "",
+      secret: "",
+      ccxt_config: {},
+      ccxt_async_config: {},
+      pair_whitelist: pairlistConfig.pair_whitelist,
+      pair_blacklist: [],
+    },
+    pairlists: pairlistConfig.pairlists,
+    stake_currency: STAKE_CURRENCY,
+    // freqtrade's SCHEMA_MINIMAL_REQUIRED (config_schema.py) — the only
+    // required keys under RunMode.OTHER, which is what download-data and
+    // test-pairlist both run under — is just this list. No
+    // stoploss/minimal_roi/entry_pricing/exit_pricing/max_open_trades here,
+    // unlike buildFreqtradeCloudInit/buildFreqAITrainingArtifacts above:
+    // this config.json never drives `trade` or `backtesting`, only
+    // download-data/test-pairlist.
+    dry_run: true,
+    dataformat_ohlcv: "feather",
+    dataformat_trades: "jsongz",
+  };
+  const configJson = JSON.stringify(dataServerConfig, null, 2);
+
+  const timeframeArgs = timeframes.map((tf) => shellEscapeDouble(tf)).join(" ");
+  const dataSourceList = DATA_SOURCE_EXCHANGES.map((ds) => shellEscapeDouble(ds)).join(" ");
+  const corrPairlistJson = JSON.stringify(DEFAULT_CORR_PAIRLIST);
+
+  // Runs once immediately at boot (the first-ever backfill — see runcmd
+  // below) and then once a day via /etc/cron.d/freqdata-refresh. The exact
+  // same script handles both cases with no branching between them:
+  // freqtrade's download-data is naturally idempotent/incremental (an
+  // overlapping --days range only ever fetches what's actually missing and
+  // appends locally), which is what let this whole design drop the old
+  // cache's separate "first run vs. daily run" logic entirely.
+  const refreshScript = `#!/bin/bash
+set -uo pipefail
+cd "${DATA_SERVER_HOME_DIR}" || exit 1
+LOG=/var/log/freqdata-refresh.log
+
+{
+echo "=== freqdata refresh run: $(date -u +%FT%TZ) ==="
+
+REFRESH_OK=0
+for data_source in ${dataSourceList}; do
+  echo "--- trying data source: $data_source ---"
+  jq --arg name "$data_source" '.exchange.name = $name' user_data/config.json > user_data/config.json.tmp \\
+    && mv user_data/config.json.tmp user_data/config.json
+
+  # --print-json writes exactly the resolved pair list, and nothing else,
+  # to stdout — freqtrade's own INFO/WARNING logging goes to stderr, which
+  # is what lets PAIRS_JSON below capture clean JSON without filtering.
+  PAIRS_JSON=$(docker run --rm -v "${DATA_SERVER_HOME_DIR}/user_data:/freqtrade/user_data" ${FREQTRADE_DOCKER_IMAGE} \\
+    test-pairlist --config user_data/config.json --print-json 2>>"$LOG")
+  if ! echo "$PAIRS_JSON" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
+    echo "test-pairlist against $data_source returned no usable pairlist, trying next source"
+    continue
+  fi
+
+  # BTC/USDT is unioned in for DOWNLOADING purposes only (every FreqAI
+  # preset's feature engineering needs it for correlation features even on
+  # a run where it wouldn't otherwise be in the top pairs by volume — see
+  # DEFAULT_CORR_PAIRLIST's own doc comment). pairlist.json itself (written
+  # below, only once download-data actually succeeds) stays the real,
+  # untouched top-pairs list — this union never affects what a bot trades,
+  # only what gets downloaded.
+  DOWNLOAD_PAIRS_JSON=$(echo "$PAIRS_JSON" | jq -c --argjson corr '${corrPairlistJson}' '. + $corr | unique')
+  readarray -t DOWNLOAD_PAIRS < <(echo "$DOWNLOAD_PAIRS_JSON" | jq -r '.[]')
+
+  echo "--- downloading ${timeframes.length} timeframes x \${#DOWNLOAD_PAIRS[@]} pairs, ${backfillDays} days, via $data_source ---"
+  if docker run --rm -v "${DATA_SERVER_HOME_DIR}/user_data:/freqtrade/user_data" ${FREQTRADE_DOCKER_IMAGE} \\
+    download-data --config user_data/config.json --days ${backfillDays} \\
+    --timeframes ${timeframeArgs} \\
+    --pairs "\${DOWNLOAD_PAIRS[@]}" \\
+    >>"$LOG" 2>&1; then
+    echo "$PAIRS_JSON" > "${DATA_SERVER_HOME_DIR}/pairlist.json"
+    REFRESH_OK=1
+    echo "=== refresh succeeded via $data_source ==="
+    break
+  else
+    echo "=== download-data failed via $data_source, trying next source ==="
+  fi
+done
+
+if [ "$REFRESH_OK" -eq 1 ]; then
+  chown -R ${DATA_SERVER_SSH_USER}:${DATA_SERVER_SSH_USER} "${DATA_SERVER_HOME_DIR}/user_data" "${DATA_SERVER_HOME_DIR}/pairlist.json"
+else
+  echo "=== refresh FAILED against every data source (tried: ${DATA_SOURCE_EXCHANGES.join(", ")}) — yesterday's data on disk is untouched, training VMs still get that ==="
+fi
+} >> "$LOG" 2>&1
+`;
+
+  // -ro (read-only) + this specific directory is the entire security
+  // boundary for a leaked training-VM private key: rrsync itself refuses
+  // any path outside DATA_SERVER_HOME_DIR and refuses to ever write.
+  // no-pty/no-port-forwarding/no-X11-forwarding/no-agent-forwarding close
+  // off every other thing an SSH session could otherwise be used for.
+  const authorizedKeysLine = `command="/usr/share/rsync/scripts/rrsync -ro ${DATA_SERVER_HOME_DIR}/",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty ${DATA_SERVER_TRUSTED_PUBLIC_KEY}\n`;
+
+  // Deliberately not top-of-hour (0 0) — a small, arbitrary offset so this
+  // doesn't line up with every other cron-driven thing that defaults to
+  // midnight. Runs as root (docker access, plus the chown at the end)
+  // rather than as DATA_SERVER_SSH_USER, which has no docker group
+  // membership and shouldn't need one.
+  const cronEntry = `PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+17 3 * * * root ${DATA_SERVER_HOME_DIR}/refresh.sh >/dev/null 2>&1\n`;
+
+  const runcmdSteps = [
+    "systemctl enable docker",
+    "systemctl start docker",
+    `docker pull ${FREQTRADE_DOCKER_IMAGE}`,
+    // --system + --no-create-home: the home dir already exists (write_files
+    // below creates it, since config.json has to be there before this user
+    // is even created) and useradd shouldn't touch its contents. A real
+    // shell (NOT /usr/sbin/nologin, --system's own default) is required
+    // despite this account never getting an interactive session: sshd runs
+    // an authorized_keys forced command via the target user's own login
+    // shell ("$SHELL -c '<command>'") — a nologin shell would refuse to
+    // run rrsync at all, not just block interactive login. The forced
+    // command itself, not the shell, is what keeps this restricted.
+    `id -u ${DATA_SERVER_SSH_USER} >/dev/null 2>&1 || useradd --system --no-create-home --home-dir ${DATA_SERVER_HOME_DIR} --shell /bin/bash ${DATA_SERVER_SSH_USER}`,
+    // Ubuntu's rsync package ships rrsync at this path but does not mark it
+    // executable by default.
+    "chmod +x /usr/share/rsync/scripts/rrsync",
+    `mkdir -p ${DATA_SERVER_HOME_DIR}/.ssh`,
+    `chown -R ${DATA_SERVER_SSH_USER}:${DATA_SERVER_SSH_USER} ${DATA_SERVER_HOME_DIR}/.ssh`,
+    `chmod 700 ${DATA_SERVER_HOME_DIR}/.ssh`,
+    "systemctl enable cron",
+    "systemctl restart cron",
+    // Kicks off the very first, full backfill immediately rather than
+    // waiting for tomorrow's 03:17 UTC slot — see this function's own doc
+    // comment (point 3: "EENMALIGE VOLLEDIGE BACKFILL"). Backgrounded, not
+    // awaited: a first run covering ~backfillDays days x every timeframe x
+    // every pair can legitimately take hours, and cloud-init finishing
+    // promptly matters more than blocking server-ready on it. Progress:
+    // `ssh root@<ip> tail -f /var/log/freqdata-refresh.log`.
+    `nohup ${DATA_SERVER_HOME_DIR}/refresh.sh > /dev/null 2>&1 &`,
+  ];
+  const runcmdYaml = runcmdSteps.map((step) => `  - ${JSON.stringify(step)}`).join("\n");
+
+  return `#cloud-config
+package_update: true
+packages:
+  - docker.io
+  - cron
+  - rsync
+  - jq
+
+write_files:
+${writeFilesBlock([
+  { path: `${DATA_SERVER_HOME_DIR}/user_data/config.json`, content: configJson },
+  { path: `${DATA_SERVER_HOME_DIR}/refresh.sh`, content: refreshScript, permissions: "0755" },
+  { path: `${DATA_SERVER_HOME_DIR}/.ssh/authorized_keys`, content: authorizedKeysLine, permissions: "0600" },
+  { path: "/etc/cron.d/freqdata-refresh", content: cronEntry, permissions: "0644" },
+])}
+
+runcmd:
+${runcmdYaml}
+`;
+}
 
 // Mirrors app/api/train/cloud/reap/route.ts's own DOWNLOAD_DATA_QUEUE_TIMEOUT_MINUTES
 // (kept as a separate read rather than a shared import since that route's
@@ -412,14 +670,11 @@ const DOWNLOAD_DATA_ATTEMPT_TIMEOUT_SECONDS = Math.max(
 // How many of the exchange's top-liquid USDT markets VolumePairList hands
 // to FreqAI when auto-select is on — wide enough for the AI to find real
 // opportunities, small enough that feature engineering/backtesting for a
-// single training run stays bounded. Exported so
-// lib/market-data-cache.ts's refreshMarketDataCache (the daily
-// POST /api/data/refresh job) caches the SAME size — caching literally
-// every active pair on the exchange would mean thousands of pair/timeframe
-// files for a shared cache that's supposed to stay small and fast to
-// serve, so the daily refresh ranks by 24h quoteVolume (via
-// fetchTopVolumeStakePairs) and keeps only this many, matching what
-// VolumePairList itself would hand to FreqAI anyway.
+// single training run stays bounded. Also used by buildDataServerCloudInit
+// below (via buildPairlistConfig(true, [])) so the permanent data server
+// downloads exactly this many top-volume pairs — the same size a real
+// auto-select bot's own VolumePairList would resolve to, not a separately
+// maintained approximation of it.
 export const AUTO_PAIRLIST_SIZE = 30;
 
 // The taker fee freqtrade uses to simulate costs during backtesting/
@@ -795,52 +1050,31 @@ interface TrainingCloudInitParams {
   /** How much historical data to download. Defaults to a multiple of the profile's own training window, so there's always enough history to actually fill it. */
   timerangeDays?: number;
   /**
-   * When present, candle data is already sitting in the server-maintained
-   * market-data cache (Supabase Storage, kept fresh by the daily
-   * POST /api/data/refresh job — see lib/market-data-cache.ts) — resolved
-   * by lib/train-cloud.ts just before this VM is even created via
-   * resolveCachedTrainingData, which mints short-lived signed Storage URLs.
-   * downloadUrls is a LIST, not a single URL: the cache is partitioned one
-   * file per (pair, timeframe, UTC day) rather than one ever-growing file
-   * per (pair, timeframe) — see lib/market-data-cache.ts's own doc comment
-   * for why (a daily refresh re-uploading the entire history just to
-   * append one day cost far more Storage egress than the free tier
-   * allows). This replaces both the original VM-side download-data step
-   * AND the later client-side/Background Fetch browser download that
-   * briefly replaced it — both turned out unreliable (Vercel/browser
-   * limits, exchange rate limits mid-run, huge auto-select pairlists)
-   * compared to a boring, centrally-refreshed cache the VM just curls
-   * from. When present, the entire DOWNLOADING_DATA download-data loop
-   * below is skipped in favor of curling every partition and concatenating
-   * them locally (via jq — see preloadedDataScript below) into the single
-   * file freqtrade actually expects, which is also why
-   * --data-format-ohlcv json gets added to the backtesting call below only
-   * on this path: the classic download-data path still writes the
-   * freqtrade image's own default (feather), but this path writes exactly
-   * the JSON the cache stores, unconverted (see lib/market-data-cache.ts's
-   * own doc comment for why JSON rather than a literal feather/parquet
-   * writer).
+   * Reachable IP/hostname of the permanent Hetzner data server (see
+   * buildDataServerCloudInit below) — set only when both this and
+   * dataServerSshPrivateKey are present, and only ever used for auto-select
+   * bots. When present, the classic DOWNLOADING_DATA download-data loop
+   * below is skipped entirely in favor of rsyncing that server's own
+   * freqtrade-downloaded data directory over SSH — see
+   * lib/train-cloud.ts's own doc comment for why this replaced the earlier
+   * Supabase-Storage-backed cache (day-partitioned signed URLs, a chunked
+   * refresh job, per-task time budgets, queue shuffling — all of it) with
+   * something closer to a boring, standard freqtrade setup: one always-on
+   * box running `freqtrade download-data` on a plain cron, ephemeral
+   * training VMs just copying its output over the private-network-adjacent
+   * link within the same Hetzner datacenter.
    */
-  preloadedData?: Array<{ pair: string; timeframe: string; downloadUrls: string[] }>;
+  dataServerHost?: string;
   /**
-   * Only meaningful together with preloadedData and autoSelectCoins — the
-   * exact top-N-by-volume pairs the shared cache actually had complete,
-   * fresh data for (see resolveCachedTrainingData in
-   * lib/market-data-cache.ts, which ranks by quoteVolume via
-   * fetchTopVolumeStakePairs instead of caching every active pair on the
-   * exchange — caching literally every active pair would mean thousands of
-   * pair/timeframe files for a cache that's supposed to stay small and
-   * fast to serve). When present, this REPLACES the normal VolumePairList
-   * config with a StaticPairList pinned to exactly these pairs, rather
-   * than leaving VolumePairList to re-rank by volume again at backtest
-   * time — otherwise a pair that moved in or out of the live top-N between
-   * the last cache refresh and this backtest run would have no local data
-   * file and fail the run. Freezing the pairlist to what's actually cached
-   * is a non-issue for a point-in-time backtest/training run (unlike live
-   * trading, which keeps using genuine dynamic VolumePairList — see
-   * buildFreqtradeCloudInit, a different function entirely).
+   * Private half of the dedicated ed25519 keypair the data server's
+   * `datasync` user trusts (see buildDataServerCloudInit's own doc comment
+   * for the matching public half and the rrsync command restriction) —
+   * read from DATA_SERVER_SSH_PRIVATE_KEY, embedded into this VM's
+   * filesystem just long enough to authenticate the rsync pull, never
+   * logged. Real trading credentials are still never placed on this box —
+   * this key only ever unlocks read-only access to public market data.
    */
-  resolvedAutoSelectPairs?: string[];
+  dataServerSshPrivateKey?: string;
   /**
    * Hard ceiling on the whole run; a `timeout`-triggered kill still fires
    * the self-destruct trap. Must stay comfortably above
@@ -907,13 +1141,13 @@ export function buildFreqAITrainingArtifacts(params: TrainingCloudInitParams): T
     callbackToken,
     hetznerApiToken,
     // See computeTrainingTimerangeDays's own doc comment (lib/training-timerange.ts)
-    // for why this is generously over-provisioned rather than a tight fit
-    // — only actually used on the classic (non-cached) download-data path
-    // below; lib/market-data-cache.ts computes its own backfill window the
+    // for why this is generously over-provisioned rather than a tight fit —
+    // only actually used on the classic (non-data-server) download-data path
+    // below; buildDataServerCloudInit computes its own backfill window the
     // same way, maxed across every strategy preset instead of just this bot's.
     timerangeDays = computeTrainingTimerangeDays(freqaiConfig),
-    preloadedData,
-    resolvedAutoSelectPairs,
+    dataServerHost,
+    dataServerSshPrivateKey,
     // Was 4h — raised alongside DOWNLOAD_DATA_QUEUE_TIMEOUT_MINUTES's default
     // (2h) so a download that legitimately uses its full allowance still
     // has real room left over for PULLING_IMAGE/TRAINING/UPLOADING
@@ -925,13 +1159,13 @@ export function buildFreqAITrainingArtifacts(params: TrainingCloudInitParams): T
   assertSafePythonIdentifier(strategy, "strategy");
 
   const safeBotName = botName.toLowerCase().replace(/[^a-z0-9-]/g, "-");
-  // See resolvedAutoSelectPairs's own doc comment above for why this
-  // freezes to a StaticPairList instead of buildPairlistConfig's normal
-  // VolumePairList whenever it's given.
-  const pairlistConfig: PairlistConfig =
-    autoSelectCoins && resolvedAutoSelectPairs && resolvedAutoSelectPairs.length > 0
-      ? { pair_whitelist: resolvedAutoSelectPairs, pairlists: [{ method: "StaticPairList" }] }
-      : buildPairlistConfig(autoSelectCoins, pairWhitelist);
+  const hasDataServer = autoSelectCoins && !!dataServerHost && !!dataServerSshPrivateKey;
+  // Always the normal (dynamic VolumePairList, for auto-select) config —
+  // even on the data-server path. The rsync step below overwrites this
+  // in-place on the VM (via jq, once it knows exactly which pairs the data
+  // server actually has) rather than this function trying to predict that
+  // pairlist itself — see rsyncDataScript's own comment for why.
+  const pairlistConfig: PairlistConfig = buildPairlistConfig(autoSelectCoins, pairWhitelist);
 
   // download-data only fetches config["pairs"], which freqtrade defaults to
   // exchange.pair_whitelist when no --pairs override is given (see
@@ -1008,74 +1242,61 @@ export function buildFreqAITrainingArtifacts(params: TrainingCloudInitParams): T
   };
   const configJson = JSON.stringify(trainingConfig, null, 2);
 
-  const hasPreloadedData = !!preloadedData && preloadedData.length > 0;
+  // Runs instead of the classic download-data loop below when a permanent
+  // data server is configured for this (auto-select-only) bot — see
+  // hasDataServer above and dataServerHost's own doc comment. Copies that
+  // server's own freqtrade-downloaded data directory (kept fresh by its
+  // own daily cron — see buildDataServerCloudInit) straight over SSH, then
+  // rewrites this VM's own config.json in place with exactly the pairlist
+  // that server actually has data for (pairlist.json, maintained by that
+  // same cron run) — a StaticPairList frozen to real, present-on-disk
+  // pairs, for the same reason resolveCachedTrainingData's replaced
+  // Supabase-backed equivalent used to freeze one: a point-in-time
+  // backtest/training run has no business asking VolumePairList to
+  // re-rank by live volume and possibly land on a pair with no local data
+  // file. Unlike that old design, there is no format conversion here at
+  // all — this server's download-data wrote freqtrade's own default
+  // format (feather), same as the classic path below, so backtesting
+  // needs no extra flag either way.
+  //
+  // -o StrictHostKeyChecking=no is a deliberate, narrow trade-off: this
+  // VM has no prior opportunity to have learned the data server's host
+  // key (it's freshly booted, and the data server's IP is just a plain
+  // config value, not something to bundle a pinned host key alongside),
+  // and the connection only ever carries public market data one way —
+  // the private key alone is what's actually being trusted here, and it
+  // authenticates the CLIENT, not the server. Worth revisiting if this
+  // link ever carries anything sensitive.
+  const rsyncDataScript = hasDataServer
+    ? `mkdir -p /root/.ssh
+cat > /root/.ssh/id_dataserver <<'DATASERVER_SSH_KEY_EOF'
+${dataServerSshPrivateKey}
+DATASERVER_SSH_KEY_EOF
+chmod 600 /root/.ssh/id_dataserver
+RSYNC_SSH='ssh -i /root/.ssh/id_dataserver -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 -o BatchMode=yes'
 
-  // Runs instead of the classic download-data loop below when the shared
-  // market-data cache already has every (pair, timeframe) this run needs
-  // (see preloadedData's own doc comment above). Each entry's downloadUrls
-  // is a LIST of short-lived signed Storage URLs — one per UTC-day
-  // partition (see lib/market-data-cache.ts's own doc comment for why the
-  // cache is partitioned that way) — downloaded in parallel (capped at 8
-  // concurrent, plain bash job control — no extra tooling needed beyond
-  // what's already installed) into a scratch directory, then concatenated
-  // with jq into the single file freqtrade's own
-  // create_datadir/_pair_data_filename (see idatahandler.py/misc.py in
-  // freqtrade's source) expects at:
-  // user_data/data/<exchange>/<pair_s>-<timeframe>.json. `unique_by(.[0])`
-  // (jq, sorting by the first array element — the candle timestamp) is a
-  // cheap safety net for the one boundary day a refresh run's merge step
-  // could have legitimately produced overlapping candles for, even though
-  // each partition's own JSON is already de-duplicated on write.
-  // <exchange> here is config.json's exchange.name, which — unlike the
-  // classic path below — this script never rewrites via jq, so it stays
-  // exactly DATA_SOURCE_EXCHANGE (trainingConfig.exchange.name's initial
-  // value above). Every downloaded partition is sanity-checked with
-  // `jq empty` before merging — a signed URL that already expired, or a
-  // network blip mid-transfer, would otherwise only surface much later as
-  // an opaque FreqAI "no data found" failure during TRAINING instead of
-  // here.
-  const preloadedDataScript = hasPreloadedData
-    ? `mkdir -p "user_data/data/${shellEscapeDouble(DATA_SOURCE_EXCHANGE)}"
-${preloadedData!
-  .map(({ pair, timeframe, downloadUrls }) => {
-    const destPath = `user_data/data/${DATA_SOURCE_EXCHANGE}/${pairToFreqtradeFilename(pair)}-${timeframe}.json`;
-    const tmpDir = `/tmp/preload/${pairToFreqtradeFilename(pair)}-${timeframe}`;
-    const safePair = shellEscapeDouble(pair);
-    const safeTimeframe = shellEscapeDouble(timeframe);
-    const safeDestPath = shellEscapeDouble(destPath);
-    const safeTmpDir = shellEscapeDouble(tmpDir);
-    const urlLines = downloadUrls.map((url) => `  "${shellEscapeDouble(url)}"`).join("\n");
-    return `echo "=== placing preloaded data: ${safePair} ${safeTimeframe} (${downloadUrls.length} partition(s)) ===" | tee -a "$TRAIN_LOG"
-mkdir -p "${safeTmpDir}"
-urls=(
-${urlLines}
-)
-i=0
-for url in "\${urls[@]}"; do
-  curl -fsS -m 60 -o "${safeTmpDir}/$i.json" "$url" &
-  i=$((i+1))
-  if [ $((i % 8)) -eq 0 ]; then wait; fi
-done
-wait
-for f in "${safeTmpDir}"/*.json; do
-  [ -s "$f" ] || fail "preloaded data partition missing/empty for ${safePair} ${safeTimeframe}: $f"
-  jq empty "$f" || fail "preloaded data partition invalid JSON for ${safePair} ${safeTimeframe}: $f"
-done
-jq -s 'add | unique_by(.[0]) | sort_by(.[0])' "${safeTmpDir}"/*.json > "${safeDestPath}" || fail "failed to merge preloaded data partitions for ${safePair} ${safeTimeframe}"
-rm -rf "${safeTmpDir}"`;
-  })
-  .join("\n")}
-echo "=== all preloaded data placed for ${preloadedData!.length} pair/timeframe combination(s) ===" | tee -a "$TRAIN_LOG"`
+mkdir -p "user_data/data/${shellEscapeDouble(DATA_SOURCE_EXCHANGE)}"
+echo "=== rsyncing market data from data server ${shellEscapeDouble(dataServerHost!)} ===" | tee -a "$TRAIN_LOG"
+rsync -az -e "$RSYNC_SSH" \\
+  "${DATA_SERVER_SSH_USER}@${shellEscapeDouble(dataServerHost!)}:user_data/data/${shellEscapeDouble(DATA_SOURCE_EXCHANGE)}/" \\
+  "user_data/data/${shellEscapeDouble(DATA_SOURCE_EXCHANGE)}/" \\
+  2>&1 | tee -a "$TRAIN_LOG" || fail "rsync of market data from data server failed"
+
+rsync -az -e "$RSYNC_SSH" \\
+  "${DATA_SERVER_SSH_USER}@${shellEscapeDouble(dataServerHost!)}:pairlist.json" \\
+  "/tmp/pairlist.json" \\
+  2>&1 | tee -a "$TRAIN_LOG" || fail "rsync of pairlist.json from data server failed"
+
+[ -s /tmp/pairlist.json ] || fail "pairlist.json from data server is empty"
+jq -e 'type == "array" and length > 0' /tmp/pairlist.json >/dev/null 2>&1 || fail "pairlist.json from data server is not a non-empty JSON array"
+
+jq --slurpfile pairs /tmp/pairlist.json \\
+  '.exchange.pair_whitelist = $pairs[0] | .pairlists = [{"method":"StaticPairList"}]' \\
+  user_data/config.json > user_data/config.json.tmp \\
+  && mv user_data/config.json.tmp user_data/config.json \\
+  || fail "failed to freeze pairlist from data server into config.json"
+echo "=== market data + pairlist synced from data server ===" | tee -a "$TRAIN_LOG"`
     : "";
-
-  // Only added to the backtesting call below when preloaded data is in
-  // play: the classic download-data path (default branch) writes the
-  // freqtrade image's own default format (feather), while this path writes
-  // exactly the JSON the cache stores, unconverted — see --data-format-ohlcv
-  // in freqtrade's ARGS_COMMON_OPTIMIZE (shared between download-data and
-  // backtesting) for why this flag alone is enough to make backtesting read
-  // JSON instead of assuming feather.
-  const backtestingDataFormatFlag = hasPreloadedData ? ` --data-format-ohlcv json` : "";
 
   // Every value that came from user-editable bot fields is escaped before
   // being embedded in a bash double-quoted assignment (see shellEscapeDouble
@@ -1182,8 +1403,8 @@ docker pull ${FREQTRADE_DOCKER_IMAGE} 2>&1 | tee -a "$TRAIN_LOG" || fail "could 
 
 report_stage "DOWNLOADING_DATA"
 ${
-  hasPreloadedData
-    ? preloadedDataScript
+  hasDataServer
+    ? rsyncDataScript
     : `# --timeframes (plural) is the only flag download-data actually accepts —
 # ARGS_DOWNLOAD_DATA in freqtrade's own commands/arguments.py has no
 # "timeframe" (singular) entry at all, unlike backtesting below. Passing
@@ -1230,7 +1451,7 @@ done
 report_stage "TRAINING"
 docker run --rm -v /opt/freqtrade/user_data:/freqtrade/user_data ${FREQTRADE_DOCKER_IMAGE} \\
   backtesting --config user_data/config.json --strategy "$STRATEGY" \\
-  --freqaimodel "$FREQAI_MODEL" --timerange "$TIMERANGE"${backtestingDataFormatFlag} \\
+  --freqaimodel "$FREQAI_MODEL" --timerange "$TIMERANGE" \\
   2>&1 | tee -a "$TRAIN_LOG" || fail "FreqAI training (via backtesting) failed"
 
 MODEL_COUNT=$(find user_data/models -name '*.joblib' 2>/dev/null | wc -l)

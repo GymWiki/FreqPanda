@@ -39,23 +39,11 @@ export const botSelect = {
       mode: true,
       errorMessage: true,
       createdAt: true,
-      trainedPairs: true,
-      candidatePairs: true,
     },
   },
 } satisfies Prisma.BotConfigurationSelect;
 
 type BotWithTrainingJobs = Prisma.BotConfigurationGetPayload<{ select: typeof botSelect }>;
-
-// Same comma-separated-string convention as BotConfiguration.pairWhitelist
-// — see TrainingJob.trainedPairs/candidatePairs in prisma/schema.prisma.
-function splitPairs(value: string | null): string[] | null {
-  if (!value) return null;
-  return value
-    .split(",")
-    .map((p) => p.trim())
-    .filter(Boolean);
-}
 
 // Flattens the `trainingJobs: [latest]` array (from `take: 1`) into a
 // single `latestTrainingJob` field for the client-facing DTO. freqaiConfig
@@ -68,8 +56,6 @@ export function toBotDTO(bot: BotWithTrainingJobs): BotConfigurationDTO {
   return {
     ...rest,
     freqaiConfig: freqaiConfig as unknown as FreqAIProfileConfig,
-    latestTrainingJob: latest
-      ? { ...latest, trainedPairs: splitPairs(latest.trainedPairs), candidatePairs: splitPairs(latest.candidatePairs) }
-      : null,
+    latestTrainingJob: latest ?? null,
   };
 }

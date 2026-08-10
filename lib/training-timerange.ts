@@ -1,16 +1,17 @@
 import type { FreqAIProfileConfig } from "@/lib/strategy-presets";
 
-// Pure, dependency-free module shared by lib/hetzner.ts (cloud-init
-// generation) and lib/market-data-cache.ts (the daily cache-refresh job) so
-// both compute training/backfill windows the exact same way — if these two
-// ever drifted apart, the cache could hold a different range of candles
-// than a training run expects to find.
-
-// Live here (rather than only in lib/hetzner.ts, a server-only module that
-// also pulls in the Hetzner API client) so lib/market-data-cache.ts can
-// import just these two small values without the rest of lib/hetzner.ts.
-// lib/hetzner.ts re-exports both so every existing import of them from
-// "@/lib/hetzner" keeps working unchanged.
+// Pure, dependency-free module used by lib/hetzner.ts for every cloud-init
+// it generates — both the ephemeral training/live-trading VMs and the
+// permanent data server (buildDataServerCloudInit) compute their
+// training/backfill windows the exact same way via computeTrainingTimerangeDays
+// below, so a training run never expects a range of candles the data server
+// didn't actually keep on disk.
+//
+// Kept as its own module (rather than folded into lib/hetzner.ts directly,
+// a server-only module that also pulls in the Hetzner API client) mostly
+// for historical reasons — lib/hetzner.ts re-exports both STAKE_CURRENCY
+// and DEFAULT_CORR_PAIRLIST below so every existing "@/lib/hetzner" import
+// of them keeps working unchanged.
 export const STAKE_CURRENCY = "USDT";
 /** FreqAI's include_corr_pairlist benchmark pair — see lib/hetzner.ts's own doc comment (where this is re-exported) for why it's a fixed platform default rather than per-bot. */
 export const DEFAULT_CORR_PAIRLIST = [`BTC/${STAKE_CURRENCY}`];
