@@ -3,6 +3,8 @@ import { createClient } from "@/lib/supabase/server";
 import { prisma } from "@/lib/prisma";
 import { Navbar } from "@/components/Navbar";
 import { TelegramSettingsForm } from "@/components/TelegramSettingsForm";
+import { DataServerAdminPanel } from "@/components/DataServerAdminPanel";
+import { isAdminUser } from "@/lib/admin";
 
 export default async function SettingsPage() {
   const supabase = await createClient();
@@ -33,6 +35,16 @@ export default async function SettingsPage() {
         </div>
 
         <TelegramSettingsForm initialChatId={profile.telegramChatId} />
+
+        {/* TEMPORARY — see DataServerAdminPanel's own doc comment. Delete
+            this block, the component, lib/admin.ts, and
+            app/api/admin/provision-data-server together once the permanent
+            data server has been provisioned. */}
+        {isAdminUser(user.email) && (
+          <div className="mt-6">
+            <DataServerAdminPanel />
+          </div>
+        )}
       </main>
     </div>
   );
