@@ -791,12 +791,31 @@ fi
 } >> "$LOG" 2>&1
 `;
 
+  // Where rrsync actually ends up on disk, regardless of how this
+  // particular image's rsync package happens to ship it (see the runcmd
+  // step below) — authorized_keys references this fixed path rather than
+  // whatever the OS package's own layout happens to be, so the two can
+  // never drift out of sync with each other.
+  const RRSYNC_PATH = "/usr/local/bin/rrsync";
+
   // -ro (read-only) + this specific directory is the entire security
   // boundary for a leaked training-VM private key: rrsync itself refuses
   // any path outside DATA_SERVER_HOME_DIR and refuses to ever write.
   // no-pty/no-port-forwarding/no-X11-forwarding/no-agent-forwarding close
   // off every other thing an SSH session could otherwise be used for.
-  const authorizedKeysLine = `command="/usr/share/rsync/scripts/rrsync -ro ${DATA_SERVER_HOME_DIR}/",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty ${DATA_SERVER_TRUSTED_PUBLIC_KEY}\n`;
+  //
+  // Deliberately kept as rrsync rather than pinning a literal
+  // `command="rsync --server ..."` string instead (the obvious-looking
+  // simpler alternative): that would hardcode the exact flag sequence
+  // rsync's client and server sides happen to negotiate today, which
+  // silently breaks on the next rsync version bump on either end — rrsync
+  // exists specifically to stay correct across that without caring which
+  // flags a compatible rsync invocation actually used, only that the
+  // requested path stays inside the one directory it's told to allow. A
+  // missing/wrong PATH here is a one-time provisioning bug (see the
+  // install step below); a fragile hardcoded rsync command line would be a
+  // recurring one.
+  const authorizedKeysLine = `command="${RRSYNC_PATH} -ro ${DATA_SERVER_HOME_DIR}/",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty ${DATA_SERVER_TRUSTED_PUBLIC_KEY}\n`;
 
   // Deliberately not top-of-hour (0 0) — a small, arbitrary offset so this
   // doesn't line up with every other cron-driven thing that defaults to
@@ -820,9 +839,34 @@ fi
     // run rrsync at all, not just block interactive login. The forced
     // command itself, not the shell, is what keeps this restricted.
     `id -u ${DATA_SERVER_SSH_USER} >/dev/null 2>&1 || useradd --system --no-create-home --home-dir ${DATA_SERVER_HOME_DIR} --shell /bin/bash ${DATA_SERVER_SSH_USER}`,
-    // Ubuntu's rsync package ships rrsync at this path but does not mark it
-    // executable by default.
-    "chmod +x /usr/share/rsync/scripts/rrsync",
+    // rrsync ships with the rsync package, but WHERE and HOW varies by
+    // distro/packaging — confirmed in production: Ubuntu 24.04's apt
+    // package does NOT place a ready-to-run copy at
+    // /usr/share/rsync/scripts/rrsync (the location this originally
+    // assumed, an unverified guess based on other distros' layout); it
+    // ships a gzipped copy under /usr/share/doc/rsync/scripts/rrsync.gz
+    // instead, as documentation rather than an installed script. A plain
+    // `chmod +x` on a path that doesn't exist fails silently in cloud-init
+    // (a failed runcmd step doesn't abort the rest), which is exactly how
+    // this got missed until a real rsync connection hit
+    // "No such file or directory" on the SSH forced command. This checks
+    // every known location this script has actually been found in,
+    // decompressing if needed, and always installs to the fixed
+    // RRSYNC_PATH above regardless of which one matched — authorized_keys
+    // never has to guess, and this is now self-healing across whatever
+    // Ubuntu does with rsync packaging next.
+    [
+      `[ -x ${RRSYNC_PATH} ] || for candidate in /usr/share/rsync/scripts/rrsync /usr/share/doc/rsync/scripts/rrsync /usr/share/doc/rsync/scripts/rrsync.gz; do`,
+      `  if [ -f "$candidate" ]; then`,
+      `    case "$candidate" in`,
+      `      *.gz) gunzip -c "$candidate" > ${RRSYNC_PATH} ;;`,
+      `      *) cp "$candidate" ${RRSYNC_PATH} ;;`,
+      `    esac`,
+      `    break`,
+      `  fi`,
+      `done`,
+      `chmod +x ${RRSYNC_PATH} 2>>/var/log/freqdata-refresh.log || echo "rrsync install: no known source found" >> /var/log/freqdata-refresh.log`,
+    ].join("\n"),
     `mkdir -p ${DATA_SERVER_HOME_DIR}/.ssh`,
     `chown -R ${DATA_SERVER_SSH_USER}:${DATA_SERVER_SSH_USER} ${DATA_SERVER_HOME_DIR}/.ssh`,
     `chmod 700 ${DATA_SERVER_HOME_DIR}/.ssh`,
