@@ -497,6 +497,24 @@ export interface DataServerConfig {
   sshPrivateKey: string;
 }
 
+// A private key pasted into an env-var UI (Vercel's included) sometimes
+// survives with its real newlines flattened into literal two-character
+// "\n" sequences instead of actual line breaks — seen in production as
+// "Load key '/root/.ssh/id_dataserver': error in libcrypto" on the
+// training VM: OpenSSH's own PEM parser sees one giant line and fails
+// before it ever gets to checking whether the key itself is valid. Fixed
+// once, here — the one place DATA_SERVER_SSH_PRIVATE_KEY is read out of
+// the environment — rather than trusting every future call site to
+// remember it. A key that was already stored correctly (real newlines) is
+// untouched: there are no literal backslash-n sequences in valid base64 for
+// this replace to match. rsyncDataScript (below) also normalizes again,
+// defensively, right before writing the file to disk on the VM — see its
+// own doc comment for why that's not redundant.
+function normalizePemKey(raw: string): string {
+  const normalized = raw.trim().replace(/\\n/g, "\n");
+  return normalized.endsWith("\n") ? normalized : `${normalized}\n`;
+}
+
 // Both env vars are set once, by hand, after running
 // scripts/provision-data-server.ts (see that script's own doc comment) —
 // there's no way to know the server's IP or mint its trusted key pair from
@@ -507,9 +525,9 @@ export interface DataServerConfig {
 // this whole feature is additive, not a hard requirement to run the app.
 export function getDataServerConfig(): DataServerConfig | null {
   const host = process.env.DATA_SERVER_HOST;
-  const sshPrivateKey = process.env.DATA_SERVER_SSH_PRIVATE_KEY;
-  if (!host || !sshPrivateKey) return null;
-  return { host, sshPrivateKey };
+  const rawSshPrivateKey = process.env.DATA_SERVER_SSH_PRIVATE_KEY;
+  if (!host || !rawSshPrivateKey) return null;
+  return { host, sshPrivateKey: normalizePemKey(rawSshPrivateKey) };
 }
 
 // Public half of the dedicated ed25519 keypair every training VM uses to
@@ -1369,9 +1387,23 @@ export function buildFreqAITrainingArtifacts(params: TrainingCloudInitParams): T
   // link ever carries anything sensitive.
   const rsyncDataScript = hasDataServer
     ? `mkdir -p /root/.ssh
-cat > /root/.ssh/id_dataserver <<'DATASERVER_SSH_KEY_EOF'
+# Captured via command substitution (not written to disk directly) so it
+# can be passed through printf '%b' below, which interprets backslash
+# escape sequences (\\n -> real newline, \\t -> tab, ...) — a defensive
+# second normalization on top of getDataServerConfig's own (lib/hetzner.ts):
+# if DATA_SERVER_SSH_PRIVATE_KEY ever ends up stored with its real newlines
+# flattened into literal "\\n" text (a real incident: OpenSSH then refuses
+# to even parse the file — "error in libcrypto" — before checking whether
+# the key itself is valid), this still recovers a loadable key. A key that
+# already has real newlines passes through %b unchanged: an actual newline
+# byte isn't a backslash-escape sequence, so there's nothing for %b to
+# interpret there. Base64/PEM text never contains a literal backslash
+# either way, so this can't misinterpret real key content.
+DATASERVER_SSH_KEY_RAW=$(cat <<'DATASERVER_SSH_KEY_EOF'
 ${dataServerSshPrivateKey}
 DATASERVER_SSH_KEY_EOF
+)
+printf '%b\\n' "$DATASERVER_SSH_KEY_RAW" > /root/.ssh/id_dataserver
 chmod 600 /root/.ssh/id_dataserver
 RSYNC_SSH='ssh -i /root/.ssh/id_dataserver -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 -o BatchMode=yes'
 
