@@ -205,6 +205,40 @@ async function fetchLocationsForServerType(serverType: string, token: string): P
   return Array.from(locations);
 }
 
+// Hetzner periodically retires older server-type names (seen in production:
+// a type still listed — and still showing real datacenter availability —
+// in /server_types can still be rejected by POST /servers with a 422
+// "server type <id> is deprecated"). deprecation is non-null once Hetzner
+// has scheduled a type for retirement, so this is the one field that
+// actually reflects "can I still order this", unlike datacenter
+// availability (see fetchLocationsForServerType's own doc comment for the
+// same kind of catalog-vs-enforcement mismatch). Used by createHetznerServer
+// below to pick a safe automatic fallback rather than surfacing a raw
+// Hetzner error the first time this app's own hardcoded default type name
+// goes stale.
+async function fetchOrderableServerTypes(
+  token: string,
+): Promise<Array<{ name: string; cores: number; memory: number; cpuType: string }>> {
+  const res = await hetznerFetch(`/server_types`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    throw new Error(`Hetzner API error (${res.status}): ${await res.text()}`);
+  }
+  const { server_types } = (await res.json()) as {
+    server_types: Array<{
+      name: string;
+      cores: number;
+      memory: number;
+      cpu_type: string;
+      deprecation: unknown | null;
+    }>;
+  };
+  return server_types
+    .filter((t) => !t.deprecation)
+    .map((t) => ({ name: t.name, cores: t.cores, memory: t.memory, cpuType: t.cpu_type }));
+}
+
 // Validates the configured HETZNER_LOCATION against this server type's real
 // availability before ever attempting to create anything, and picks a
 // working fallback instead of letting a stale/mismatched env var 422 on
@@ -234,13 +268,16 @@ async function resolveServerLocation(serverType: string, preferredLocation: stri
   return fallback;
 }
 
-export async function createHetznerServer({
-  name,
-  cloudInit,
-  serverType,
-  firewallProfile,
-}: CreateServerParams): Promise<HetznerServerResponse> {
-  const token = requireHetznerToken();
+// allowDeprecatedFallback: internal-only, set to false on the one retry
+// createHetznerServer below makes for itself — prevents an infinite loop if
+// Hetzner's own /server_types listing were ever inconsistent with what
+// POST /servers actually accepts (its own fallback pick turning out to
+// also 422 as deprecated).
+async function createHetznerServerOnce(
+  { name, cloudInit, serverType, firewallProfile }: CreateServerParams,
+  token: string,
+  allowDeprecatedFallback: boolean,
+): Promise<HetznerServerResponse> {
   const firewallId = firewallProfile ? await ensureFirewall(firewallProfile) : undefined;
 
   const resolvedServerType = serverType || process.env.HETZNER_SERVER_TYPE || "cx11";
@@ -281,10 +318,38 @@ export async function createHetznerServer({
             : " Kon geen beschikbare locaties ophalen bij Hetzner — probeer het later opnieuw."),
       );
     }
+    // Hetzner retires server-type names over time (seen in production: a
+    // hardcoded default like "cx22" starts getting rejected here with
+    // "server type <id> is deprecated" even though it still showed up as
+    // orderable everywhere else we'd checked — see fetchOrderableServerTypes'
+    // own doc comment). Rather than surface that raw error, automatically
+    // retry once against the cheapest still-orderable shared-vCPU type —
+    // this app never needs a specific type badly enough to fail a whole
+    // provisioning request over a name Hetzner renamed out from under it.
+    if (res.status === 422 && /is deprecated/i.test(errorBody) && allowDeprecatedFallback) {
+      const available = await fetchOrderableServerTypes(token).catch(() => []);
+      const fallback = available
+        .filter((t) => t.cpuType === "shared" && t.name !== resolvedServerType)
+        .sort((a, b) => a.cores - b.cores || a.memory - b.memory)[0];
+      if (fallback) {
+        console.warn(
+          `[hetzner] Server type "${resolvedServerType}" is deprecated by Hetzner — retrying with "${fallback.name}" instead.`,
+        );
+        return createHetznerServerOnce({ name, cloudInit, serverType: fallback.name, firewallProfile }, token, false);
+      }
+      throw new Error(
+        `Server-type "${resolvedServerType}" is afgeschaft bij Hetzner en er kon geen geldig alternatief gevonden worden — probeer het later opnieuw.`,
+      );
+    }
     throw new Error(`Hetzner API error (${res.status}): ${errorBody}`);
   }
 
   return res.json();
+}
+
+export async function createHetznerServer(params: CreateServerParams): Promise<HetznerServerResponse> {
+  const token = requireHetznerToken();
+  return createHetznerServerOnce(params, token, true);
 }
 
 export async function deleteHetznerServer(serverId: string): Promise<void> {
