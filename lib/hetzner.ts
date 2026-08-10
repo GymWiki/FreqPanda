@@ -497,21 +497,31 @@ export interface DataServerConfig {
   sshPrivateKey: string;
 }
 
-// A private key pasted into an env-var UI (Vercel's included) sometimes
-// survives with its real newlines flattened into literal two-character
-// "\n" sequences instead of actual line breaks — seen in production as
-// "Load key '/root/.ssh/id_dataserver': error in libcrypto" on the
-// training VM: OpenSSH's own PEM parser sees one giant line and fails
-// before it ever gets to checking whether the key itself is valid. Fixed
-// once, here — the one place DATA_SERVER_SSH_PRIVATE_KEY is read out of
-// the environment — rather than trusting every future call site to
-// remember it. A key that was already stored correctly (real newlines) is
-// untouched: there are no literal backslash-n sequences in valid base64 for
-// this replace to match. rsyncDataScript (below) also normalizes again,
-// defensively, right before writing the file to disk on the VM — see its
-// own doc comment for why that's not redundant.
+// A private key pasted into an env-var UI (Vercel's included) can survive
+// mangled in more than one way — seen in production, TWICE, as "Load key
+// '/root/.ssh/id_dataserver': error in libcrypto" on the training VM
+// (OpenSSH's own PEM parser fails before it ever gets to checking whether
+// the key itself is valid):
+//   1. Real newlines flattened into literal two-character "\n" text
+//      (the first fix — turned out insufficient on its own).
+//   2. Real Windows-style CRLF line endings (an actual 0x0D byte before
+//      each 0x0A) — e.g. from copying the key through something that
+//      normalizes line endings on the way. libcrypto's PEM reader does not
+//      reliably tolerate a stray \r inside the base64 body.
+//   3. A leading UTF-8 BOM (some editors add one on save) — breaks the
+//      "-----BEGIN..." literal-prefix match PEM parsing depends on.
+// All three are handled here, once — the one place
+// DATA_SERVER_SSH_PRIVATE_KEY is read out of the environment — rather than
+// trusting every future call site to remember it. A key that was already
+// stored correctly is untouched: none of these patterns occur in valid
+// PEM text. rsyncDataScript (below) also normalizes again, defensively,
+// right before writing the file to disk on the VM, AND validates the
+// result with `ssh-keygen -y` before ever attempting the rsync connection
+// — see its own doc comment for why that's not redundant.
 function normalizePemKey(raw: string): string {
-  const normalized = raw.trim().replace(/\\n/g, "\n");
+  let normalized = raw.trim().replace(/^\uFEFF/, "");
+  normalized = normalized.replace(/\\r\\n/g, "\n").replace(/\\n/g, "\n");
+  normalized = normalized.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   return normalized.endsWith("\n") ? normalized : `${normalized}\n`;
 }
 
@@ -1390,21 +1400,36 @@ export function buildFreqAITrainingArtifacts(params: TrainingCloudInitParams): T
 # Captured via command substitution (not written to disk directly) so it
 # can be passed through printf '%b' below, which interprets backslash
 # escape sequences (\\n -> real newline, \\t -> tab, ...) — a defensive
-# second normalization on top of getDataServerConfig's own (lib/hetzner.ts):
-# if DATA_SERVER_SSH_PRIVATE_KEY ever ends up stored with its real newlines
-# flattened into literal "\\n" text (a real incident: OpenSSH then refuses
-# to even parse the file — "error in libcrypto" — before checking whether
-# the key itself is valid), this still recovers a loadable key. A key that
-# already has real newlines passes through %b unchanged: an actual newline
-# byte isn't a backslash-escape sequence, so there's nothing for %b to
-# interpret there. Base64/PEM text never contains a literal backslash
-# either way, so this can't misinterpret real key content.
+# second normalization on top of getDataServerConfig's own (lib/hetzner.ts,
+# normalizePemKey — see its own doc comment for the two production
+# incidents this is guarding against: literal "\\n" text, and real CRLF
+# line endings). A key that already has real newlines passes through %b
+# unchanged: an actual newline byte isn't a backslash-escape sequence, so
+# there's nothing for %b to interpret there. \`tr -d '\\r'\` afterward strips
+# any literal carriage-return BYTES (as opposed to the literal two-character
+# "\\r" TEXT %b already handles) — belt and suspenders, since libcrypto's
+# PEM reader does not reliably tolerate a stray \\r inside the base64 body.
 DATASERVER_SSH_KEY_RAW=$(cat <<'DATASERVER_SSH_KEY_EOF'
 ${dataServerSshPrivateKey}
 DATASERVER_SSH_KEY_EOF
 )
-printf '%b\\n' "$DATASERVER_SSH_KEY_RAW" > /root/.ssh/id_dataserver
+printf '%b\\n' "$DATASERVER_SSH_KEY_RAW" | tr -d '\\r' > /root/.ssh/id_dataserver
 chmod 600 /root/.ssh/id_dataserver
+
+# Fails fast with a clear, actionable message instead of the generic rsync
+# "Permission denied" this whole normalization dance exists to get past —
+# ssh-keygen -y is the same PEM parser OpenSSH itself uses, so this is a
+# real pass/fail signal, not a guess. Only the file's own structural shape
+# is logged (line/byte counts, and the BEGIN/END marker lines, which are
+# identical boilerplate for every OpenSSH key and reveal nothing about
+# this one) — never the key material itself.
+echo "=== data-server SSH key: $(wc -l < /root/.ssh/id_dataserver) lines, $(wc -c < /root/.ssh/id_dataserver) bytes ===" | tee -a "$TRAIN_LOG"
+echo "=== first line: $(head -n 1 /root/.ssh/id_dataserver) ===" | tee -a "$TRAIN_LOG"
+echo "=== last line: $(tail -n 1 /root/.ssh/id_dataserver) ===" | tee -a "$TRAIN_LOG"
+ssh-keygen -y -f /root/.ssh/id_dataserver -P '' > /dev/null 2>>"$TRAIN_LOG" \\
+  || fail "DATA_SERVER_SSH_PRIVATE_KEY still doesn't parse as a valid SSH private key after newline/CR normalization — re-check the exact value stored in Vercel (should be only the PEM block, no surrounding quotes)"
+echo "=== data-server SSH key parses OK ===" | tee -a "$TRAIN_LOG"
+
 RSYNC_SSH='ssh -i /root/.ssh/id_dataserver -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 -o BatchMode=yes'
 
 mkdir -p "user_data/data/${shellEscapeDouble(DATA_SOURCE_EXCHANGE)}"
