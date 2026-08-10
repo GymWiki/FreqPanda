@@ -132,6 +132,8 @@ export function DataServerAdminPanel() {
             {isMutating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
             Server verwijderen
           </button>
+
+          <SshKeyInstructions />
         </div>
       ) : (
         <div>
@@ -150,6 +152,7 @@ export function DataServerAdminPanel() {
             <code className="text-slate-400">DATA_SERVER_SSH_PRIVATE_KEY</code> in Vercel. De eerste volledige backfill
             start automatisch en kan uren duren.
           </p>
+          <SshKeyInstructions />
         </div>
       )}
 
@@ -159,5 +162,39 @@ export function DataServerAdminPanel() {
         </p>
       )}
     </div>
+  );
+}
+
+// DATA_SERVER_SSH_PRIVATE_KEY must be a base64 encoding of the full PEM key
+// — see normalizeBase64Key's own doc comment in lib/hetzner.ts for why a
+// raw multi-line PEM pasted straight into a Vercel env var doesn't survive
+// reliably (three separate production incidents, in order: literal "\n"
+// text, real CRLF line endings, and finally newlines disappearing
+// altogether). Purely instructional — no key material is ever generated,
+// shown, or handled by this UI; (re)keying the datasync trust relationship
+// on the data server itself still requires the manual SSH steps this
+// component only documents, not automates.
+function SshKeyInstructions() {
+  return (
+    <details className="mt-1 text-[11px] text-slate-500">
+      <summary className="cursor-pointer select-none text-slate-400">SSH-sleutel instellen of vervangen</summary>
+      <div className="mt-2 space-y-2 pl-2">
+        <p>1. Genereer een base64-waarde van de private key (op je eigen machine, nooit hier):</p>
+        <pre className="overflow-x-auto rounded-lg border border-slate-700 bg-slate-900 p-2 font-mono text-slate-300">
+          base64 -w0 id_dataserver{"\n"}
+          {"# macOS: base64 -i id_dataserver"}
+        </pre>
+        <p>
+          2. Plak die ene regel als <code className="text-slate-400">DATA_SERVER_SSH_PRIVATE_KEY</code> in Vercel
+          (Production) — nooit de ruwe PEM-inhoud direct, die overleeft het env-var-veld niet betrouwbaar.
+        </p>
+        <p>
+          3. Het bijbehorende publieke deel moet al in <code className="text-slate-400">~/.ssh/authorized_keys</code>{" "}
+          van de <code className="text-slate-400">datasync</code>-gebruiker op de data-server staan (gebeurt
+          automatisch bij het aanmaken van de server hierboven — alleen nodig om opnieuw te doen bij een volledig
+          nieuw sleutelpaar).
+        </p>
+      </div>
+    </details>
   );
 }

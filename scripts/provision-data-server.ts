@@ -26,8 +26,10 @@
 //
 // After this prints a public IP, set DATA_SERVER_HOST to it in Vercel's
 // Environment Variables (Production) — see this script's own final output
-// for the full checklist, including the DATA_SERVER_SSH_PRIVATE_KEY value
-// training VMs need to actually reach this box.
+// for the full checklist, including DATA_SERVER_SSH_PRIVATE_KEY (must be
+// base64-encoded — see normalizeBase64Key's own doc comment in
+// lib/hetzner.ts for why raw multi-line PEM text doesn't survive a Vercel
+// env var reliably, and how to generate the base64 value).
 import { buildDataServerCloudInit, createHetznerServer, DATA_SERVER_HETZNER_NAME } from "../lib/hetzner";
 
 const DATA_SERVER_TYPE = process.env.DATA_SERVER_TYPE || "cx22";
@@ -55,7 +57,9 @@ async function main() {
   console.log("Next steps:");
   console.log("  1. In Vercel (Production env), set:");
   console.log(`       DATA_SERVER_HOST=${ip ?? "<server IP once assigned>"}`);
-  console.log("       DATA_SERVER_SSH_PRIVATE_KEY=<the private key you were given separately>");
+  console.log("       DATA_SERVER_SSH_PRIVATE_KEY=<base64 of the private key you were given separately>");
+  console.log("         (generate with: base64 -w0 id_dataserver   -- Linux)");
+  console.log("         (generate with: base64 -i id_dataserver    -- macOS)");
   console.log("  2. Wait for the first backfill to finish (can take hours — this is a one-time,");
   console.log("     full-history download for every timeframe and every top-volume pair). Check:");
   console.log(`       ssh root@${ip ?? "<ip>"} tail -f /var/log/freqdata-refresh.log`);
