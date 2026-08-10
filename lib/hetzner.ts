@@ -366,6 +366,41 @@ export async function deleteHetznerServer(serverId: string): Promise<void> {
   }
 }
 
+// Fixed name for the one permanent data server this app ever creates (see
+// buildDataServerCloudInit) — shared by scripts/provision-data-server.ts
+// and app/api/admin/data-server so "look it up", "create it", and "delete
+// it" all agree on which Hetzner server they mean, the same way
+// ensureFirewall's own firewall names double as their lookup key.
+export const DATA_SERVER_HETZNER_NAME = "freqpanda-data-server";
+
+export interface DataServerStatus {
+  id: number;
+  status: string;
+  ip: string | null;
+  created: string;
+}
+
+// Looks the permanent data server up by name rather than tracking its id
+// anywhere in our own DB — there's exactly one of these, ever, so Hetzner's
+// own server-list is already the single source of truth for whether it
+// exists and what state it's in. Returns null (not an error) when none
+// exists yet, e.g. before the first provisioning call.
+export async function findDataServer(): Promise<DataServerStatus | null> {
+  const token = requireHetznerToken();
+  const res = await hetznerFetch(`/servers?name=${encodeURIComponent(DATA_SERVER_HETZNER_NAME)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    throw new Error(`Hetzner API error (${res.status}): ${await res.text()}`);
+  }
+  const { servers } = (await res.json()) as {
+    servers: Array<{ id: number; status: string; created: string; public_net: { ipv4?: { ip: string } } }>;
+  };
+  const server = servers[0];
+  if (!server) return null;
+  return { id: server.id, status: server.status, ip: server.public_net.ipv4?.ip ?? null, created: server.created };
+}
+
 // Sleep Mode: powers the VM off (immediate, hard poweroff — safe here
 // since only paper-trading bots with no real position at risk are ever
 // eligible, see app/api/bots/sleep-sweep) without deleting it, so Hetzner

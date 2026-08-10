@@ -1,11 +1,12 @@
 // Stands up the ONE permanent Hetzner box this app relies on for market
 // data (see buildDataServerCloudInit in ../lib/hetzner.ts for what actually
-// runs on it). Run this by hand, once, from a machine that can both reach
-// api.hetzner.cloud and hold a real HETZNER_API_TOKEN — NOT triggered from
-// inside a Vercel request the way every other server this app creates is,
-// since "provision the one permanent data server" is an operator action,
-// not something that should ever happen as a side effect of a user's own
-// request.
+// runs on it). Run this by hand from a machine that can both reach
+// api.hetzner.cloud and hold a real HETZNER_API_TOKEN. The Settings page's
+// admin panel (components/DataServerAdminPanel.tsx, backed by
+// app/api/admin/data-server) offers the same create/status/delete actions
+// from the deployed app itself — this script is the equivalent local-shell
+// path, useful when you'd rather not go through the browser (e.g.
+// scripting, or before DATA_SERVER_TYPE/HETZNER_* are set in Vercel).
 //
 // Usage:
 //   HETZNER_API_TOKEN=... [HETZNER_LOCATION=fsn1] [DATA_SERVER_TYPE=cx22] \
@@ -27,9 +28,8 @@
 // Environment Variables (Production) — see this script's own final output
 // for the full checklist, including the DATA_SERVER_SSH_PRIVATE_KEY value
 // training VMs need to actually reach this box.
-import { buildDataServerCloudInit, createHetznerServer } from "../lib/hetzner";
+import { buildDataServerCloudInit, createHetznerServer, DATA_SERVER_HETZNER_NAME } from "../lib/hetzner";
 
-const DATA_SERVER_NAME = "freqpanda-data-server";
 const DATA_SERVER_TYPE = process.env.DATA_SERVER_TYPE || "cx22";
 
 async function main() {
@@ -38,11 +38,11 @@ async function main() {
     process.exit(1);
   }
 
-  console.log(`Provisioning permanent data server "${DATA_SERVER_NAME}" (type: ${DATA_SERVER_TYPE})...`);
+  console.log(`Provisioning permanent data server "${DATA_SERVER_HETZNER_NAME}" (type: ${DATA_SERVER_TYPE})...`);
   const cloudInit = buildDataServerCloudInit();
 
   const { server } = await createHetznerServer({
-    name: DATA_SERVER_NAME,
+    name: DATA_SERVER_HETZNER_NAME,
     cloudInit,
     serverType: DATA_SERVER_TYPE,
     firewallProfile: "data-server",

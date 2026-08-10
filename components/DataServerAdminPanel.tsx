@@ -1,43 +1,80 @@
 "use client";
 
-import { useState } from "react";
-import { Copy, Loader2, Server } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Copy, Loader2, Server, Trash2 } from "lucide-react";
 import { apiFetch, toErrorMessage } from "@/lib/api-client";
 
-interface ProvisionResult {
+interface DataServerStatus {
   id: number;
   status: string;
   ip: string | null;
+  created: string;
 }
 
-// TEMPORARY: UI for the one-off POST /api/admin/provision-data-server
-// action — see that route's own doc comment for why this exists and why
-// it's meant to come out again once the permanent data server has been
-// created. Not linked from anywhere else, and the route itself is gated to
-// a single hardcoded operator account (lib/admin.ts) — this component
-// rendering is just convenience, not the real access control.
+// Settings-page panel for the one permanent data server this app depends
+// on (see buildDataServerCloudInit in lib/hetzner.ts) — shows whether it
+// exists, and lets the operator create or delete it. Backed by
+// app/api/admin/data-server, which is itself gated to a single hardcoded
+// operator account (lib/admin.ts); this component rendering (see
+// app/settings/page.tsx) is just convenience, not the real access control.
 export function DataServerAdminPanel() {
-  const [isProvisioning, setIsProvisioning] = useState(false);
-  const [result, setResult] = useState<ProvisionResult | null>(null);
+  const [server, setServer] = useState<DataServerStatus | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isMutating, setIsMutating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [justCopied, setJustCopied] = useState(false);
 
-  async function handleProvision() {
+  useEffect(() => {
+    let cancelled = false;
+    apiFetch<{ server: DataServerStatus | null }>("/api/admin/data-server")
+      .then((data) => {
+        if (!cancelled) setServer(data.server);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(toErrorMessage(err, "Kon status niet ophalen"));
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function handleCreate() {
     setError(null);
-    setIsProvisioning(true);
+    setIsMutating(true);
     try {
-      const data = await apiFetch<ProvisionResult>("/api/admin/provision-data-server", { method: "POST" });
-      setResult(data);
+      const data = await apiFetch<{ id: number; status: string; ip: string | null }>("/api/admin/data-server", {
+        method: "POST",
+      });
+      setServer({ ...data, created: new Date().toISOString() });
     } catch (err) {
       setError(toErrorMessage(err, "Aanmaken van de data-server is mislukt"));
     } finally {
-      setIsProvisioning(false);
+      setIsMutating(false);
+    }
+  }
+
+  async function handleDelete() {
+    if (!confirm("Data-server verwijderen? De permanente marktdata gaat hiermee verloren — nieuwe trainingsruns vallen dan terug op de klassieke download-per-run.")) {
+      return;
+    }
+    setError(null);
+    setIsMutating(true);
+    try {
+      await apiFetch("/api/admin/data-server", { method: "DELETE" });
+      setServer(null);
+    } catch (err) {
+      setError(toErrorMessage(err, "Verwijderen is mislukt"));
+    } finally {
+      setIsMutating(false);
     }
   }
 
   async function handleCopy() {
-    if (!result?.ip) return;
-    await navigator.clipboard.writeText(result.ip);
+    if (!server?.ip) return;
+    await navigator.clipboard.writeText(server.ip);
     setJustCopied(true);
     setTimeout(() => setJustCopied(false), 2000);
   }
@@ -46,41 +83,33 @@ export function DataServerAdminPanel() {
     <div className="card-surface p-6">
       <div className="mb-4 flex items-center gap-2">
         <Server className="h-4 w-4 text-primary" />
-        <h2 className="font-semibold">Data-server provisionen (tijdelijk)</h2>
+        <h2 className="font-semibold">Data-server</h2>
       </div>
 
       <p className="mb-4 text-xs text-slate-400">
-        Maakt de permanente Hetzner-server aan die dagelijks marktdata downloadt (zie <code>buildDataServerCloudInit</code>
-        ). Eenmalige actie — de eerste volledige backfill start automatisch en kan uren duren.
+        De permanente Hetzner-server die dagelijks marktdata downloadt voor auto-select training (zie{" "}
+        <code>buildDataServerCloudInit</code>).
       </p>
 
-      {!result && (
-        <button
-          type="button"
-          onClick={handleProvision}
-          disabled={isProvisioning}
-          className="flex items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-background transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {isProvisioning && <Loader2 className="h-4 w-4 animate-spin" />}
-          Server aanmaken
-        </button>
-      )}
-
-      {result && (
+      {isLoading ? (
+        <p className="flex items-center gap-2 text-xs text-slate-500">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          Status ophalen...
+        </p>
+      ) : server ? (
         <div className="space-y-3 text-xs">
           <p className="text-slate-300">
-            Server aangemaakt: <span className="font-mono">id={result.id}</span>{" "}
-            <span className="font-mono">status={result.status}</span>
+            <span className="font-mono">id={server.id}</span> · <span className="font-mono">status={server.status}</span>
           </p>
 
-          {result.ip ? (
+          {server.ip && (
             <div>
               <span className="mb-1 block text-slate-400">
-                Zet dit als <code className="text-slate-300">DATA_SERVER_HOST</code> in Vercel (Production):
+                IP (hoort als <code className="text-slate-300">DATA_SERVER_HOST</code> in Vercel te staan):
               </span>
               <div className="flex items-center gap-2">
                 <code className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 font-mono text-slate-200">
-                  {result.ip}
+                  {server.ip}
                 </code>
                 <button
                   type="button"
@@ -92,15 +121,34 @@ export function DataServerAdminPanel() {
                 </button>
               </div>
             </div>
-          ) : (
-            <p className="text-amber-300">
-              Nog geen IP toegewezen — herlaad de Hetzner Cloud console over een paar seconden om 'm op te zoeken.
-            </p>
           )}
 
-          <p className="text-slate-500">
-            Vergeet niet ook <code className="text-slate-400">DATA_SERVER_SSH_PRIVATE_KEY</code> te zetten (de sleutel die
-            je al hebt gekregen) — zonder die twee samen doet deze server niets voor lopende trainingsruns.
+          <button
+            type="button"
+            onClick={handleDelete}
+            disabled={isMutating}
+            className="flex items-center gap-1.5 rounded-lg border border-red-500/30 px-3 py-2 text-red-300 transition hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {isMutating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+            Server verwijderen
+          </button>
+        </div>
+      ) : (
+        <div>
+          <p className="mb-3 text-xs text-amber-300">Geen data-server gevonden.</p>
+          <button
+            type="button"
+            onClick={handleCreate}
+            disabled={isMutating}
+            className="flex items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-background transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {isMutating && <Loader2 className="h-4 w-4 animate-spin" />}
+            Server aanmaken
+          </button>
+          <p className="mt-2 text-[11px] text-slate-500">
+            Na aanmaken: zet <code className="text-slate-400">DATA_SERVER_HOST</code> (het IP hierboven) en{" "}
+            <code className="text-slate-400">DATA_SERVER_SSH_PRIVATE_KEY</code> in Vercel. De eerste volledige backfill
+            start automatisch en kan uren duren.
           </p>
         </div>
       )}

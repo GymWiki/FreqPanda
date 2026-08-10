@@ -1,8 +1,6 @@
 // This app has no real admin-role system — one operator account owns
-// everything infra-related (provisioning the permanent data server, etc.).
-// Used by app/api/admin/provision-data-server, a temporary endpoint meant
-// to be deleted again once the data server has been provisioned once — see
-// that route's own doc comment.
+// everything infra-related (creating/deleting the permanent data server,
+// etc.). Used by app/api/admin/data-server.
 const DEFAULT_ADMIN_EMAIL = "pieter.kluvers06@gmail.com";
 
 export function isAdminUser(email: string | null | undefined): boolean {

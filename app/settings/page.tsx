@@ -36,10 +36,8 @@ export default async function SettingsPage() {
 
         <TelegramSettingsForm initialChatId={profile.telegramChatId} />
 
-        {/* TEMPORARY — see DataServerAdminPanel's own doc comment. Delete
-            this block, the component, lib/admin.ts, and
-            app/api/admin/provision-data-server together once the permanent
-            data server has been provisioned. */}
+        {/* Operator-only — see lib/admin.ts. Manages the one permanent
+            data server this app depends on (app/api/admin/data-server). */}
         {isAdminUser(user.email) && (
           <div className="mt-6">
             <DataServerAdminPanel />
