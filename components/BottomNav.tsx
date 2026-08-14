@@ -4,13 +4,13 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Bot, Settings } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { Dictionary } from "@/lib/i18n";
+import { getDictionary, type Locale } from "@/lib/i18n";
 
 // Exchange-account management moved from its own global "Platformen" tab
 // into each bot's own card (see components/BotCard.tsx, components/
 // ConnectExchangeDialog.tsx) — there's no longer a bot-independent
 // "platforms" screen for this tab to point at.
-function tabs(dict: Dictionary) {
+function tabs(dict: ReturnType<typeof getDictionary>) {
   return [
     { href: "/dashboard", label: dict.nav.myBots, icon: Bot },
     { href: "/settings", label: dict.nav.settings, icon: Settings },
@@ -27,14 +27,18 @@ function tabs(dict: Dictionary) {
 // don't include it, so it stays hidden there and only appears once the
 // user has actually navigated into one of the three tabs below.
 //
-// dict comes as a prop from Navbar (a server component that already
-// resolves its own — see that component's own doc comment) rather than
-// via useDictionary(): this component can render on pages that never set
-// up an <I18nProvider> at all (Navbar renders on "/", the public marketing
-// page, too), so it can't assume that context exists.
-export function BottomNav({ dict }: { dict: Dictionary }) {
+// Takes `locale` (a plain string) as a prop from Navbar, not the resolved
+// dict — Navbar is a server component, BottomNav a client component, and a
+// Dictionary's values include functions, which can't cross a Server-to-
+// Client props boundary (React throws at render time). getDictionary() is
+// resolved here instead, client-side, from that plain locale string.
+//
+// Doesn't use useDictionary() either: this component can render on pages
+// that never set up an <I18nProvider> at all (Navbar renders on "/", the
+// public marketing page, too), so it can't assume that context exists.
+export function BottomNav({ locale }: { locale: Locale }) {
   const pathname = usePathname();
-  const TABS = tabs(dict);
+  const TABS = tabs(getDictionary(locale));
   const isOnAppRoute = TABS.some(({ href }) => pathname === href || pathname.startsWith(`${href}/`));
   if (!isOnAppRoute) return null;
 

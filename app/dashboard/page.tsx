@@ -5,6 +5,7 @@ import { Navbar } from "@/components/Navbar";
 import { BotFleetGrid } from "@/components/BotFleetGrid";
 import { PnlChart } from "@/components/PnlChart";
 import { I18nProvider } from "@/components/I18nProvider";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { botSelect, toBotDTO } from "@/lib/bot-select";
 import { getUserLocale } from "@/lib/profile-locale";
 import { getDictionary } from "@/lib/i18n";
@@ -51,7 +52,7 @@ export default async function DashboardPage() {
   const dict = getDictionary(locale);
 
   return (
-    <I18nProvider dict={dict}>
+    <I18nProvider locale={locale}>
       <div className="min-h-screen bg-background">
         <Navbar />
         <main className="mx-auto max-w-6xl px-4 pb-24 pt-6 sm:px-6 sm:py-10 md:pb-10">
@@ -63,10 +64,14 @@ export default async function DashboardPage() {
           </div>
 
           <div className="mb-6">
-            <PnlChart />
+            <ErrorBoundary>
+              <PnlChart />
+            </ErrorBoundary>
           </div>
 
-          <BotFleetGrid initialBots={botDTOs} vpsBotQuota={profile.vpsBotQuota} />
+          <ErrorBoundary>
+            <BotFleetGrid initialBots={botDTOs} vpsBotQuota={profile.vpsBotQuota} />
+          </ErrorBoundary>
         </main>
       </div>
     </I18nProvider>

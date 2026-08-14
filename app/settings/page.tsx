@@ -38,7 +38,7 @@ export default async function SettingsPage() {
   const dict = getDictionary(locale);
 
   return (
-    <I18nProvider dict={dict}>
+    <I18nProvider locale={locale}>
       <div className="min-h-screen bg-background">
         <Navbar />
         <main className="mx-auto max-w-2xl px-4 pb-24 pt-6 sm:px-6 sm:py-10 md:pb-10">

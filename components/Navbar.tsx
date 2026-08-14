@@ -19,7 +19,8 @@ export async function Navbar() {
   const {
     data: { user },
   } = await supabase.auth.getUser();
-  const dict = getDictionary(user ? await getUserLocale(user.id) : undefined);
+  const locale = user ? await getUserLocale(user.id) : undefined;
+  const dict = getDictionary(locale);
 
   return (
     <>
@@ -60,7 +61,7 @@ export async function Navbar() {
           </div>
         </nav>
       </header>
-      {user && <BottomNav dict={dict} />}
+      {user && locale && <BottomNav locale={locale} />}
     </>
   );
 }

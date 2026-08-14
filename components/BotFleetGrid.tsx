@@ -6,6 +6,7 @@ import type { BotConfigurationDTO } from "@/lib/types";
 import { BotCard } from "@/components/BotCard";
 import { NewBotDialog } from "@/components/NewBotDialog";
 import { PanicButton } from "@/components/PanicButton";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { apiFetch } from "@/lib/api-client";
 import { useDictionary } from "@/components/I18nProvider";
 
@@ -90,7 +91,12 @@ export function BotFleetGrid({ initialBots }: BotFleetGridProps) {
       ) : (
         <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
           {bots.map((bot) => (
-            <BotCard key={bot.id} bot={bot} onUpdate={handleUpdate} onDelete={handleDelete} />
+            // Scoped per card: a crash rendering one bot (unexpected data
+            // shape, a null field a component assumed was always set)
+            // shouldn't take every other bot in the fleet down with it.
+            <ErrorBoundary key={bot.id}>
+              <BotCard bot={bot} onUpdate={handleUpdate} onDelete={handleDelete} />
+            </ErrorBoundary>
           ))}
         </div>
       )}
