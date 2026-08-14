@@ -37,6 +37,7 @@ import { DEFAULT_PAPER_TOTAL_BUDGET, DEFAULT_PAPER_MAX_STAKE_PERCENTAGE } from "
 import { isTauri } from "@/lib/tauri";
 import { apiFetch, toErrorMessage } from "@/lib/api-client";
 import { useDictionary } from "@/components/I18nProvider";
+import { InfoTooltip } from "@/components/ui/Tooltip";
 
 interface BotCardProps {
   bot: BotConfigurationDTO;
@@ -454,7 +455,10 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
 
       <div className="flex items-center justify-between gap-3 rounded-lg bg-background px-3 py-2">
         <div className="min-w-0">
-          <p className="text-xs font-medium text-slate-200">{dict.botCard.exchangeAccount}</p>
+          <p className="flex items-center gap-1.5 text-xs font-medium text-slate-200">
+            {dict.botCard.exchangeAccount}
+            <InfoTooltip text={dict.botCard.exchangeAccountTooltip} />
+          </p>
           {bot.exchangeConnection ? (
             <p className="mt-0.5 flex items-center gap-1 text-[11px]">
               {bot.exchangeConnection.verified ? (
@@ -574,8 +578,9 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
             PAUSED_MANUAL is the one exception: the user explicitly asked
             this pill itself to read "Gestopt" instead of "Paper Trading"/
             "Live Trading" while a bot is individually stopped. */}
-        <span>
+        <span className="flex items-center gap-1.5">
           {bot.status === "PAUSED_MANUAL" ? dict.botCard.stoppedLabel : bot.isPaperTrading ? dict.botCard.practiceMode : dict.botCard.realMoney}
+          <InfoTooltip text={dict.botCard.modeTooltip} />
         </span>
         {canGoLive && (
           <button

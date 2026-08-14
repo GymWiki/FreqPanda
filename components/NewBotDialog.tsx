@@ -111,7 +111,7 @@ export function NewBotDialog({ onCreated }: NewBotDialogProps) {
               />
             </Field>
 
-            <FieldGroup label={dict.newBot.aiBehaviorLabel}>
+            <FieldGroup label={dict.newBot.aiBehaviorLabel} tooltip={dict.newBot.aiBehaviorTooltip}>
               <StrategyPicker
                 selectedId={form.strategyId}
                 onSelect={(preset) => setForm({ ...form, strategyId: preset.id })}

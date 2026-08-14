@@ -42,6 +42,8 @@ export const en: Dictionary = {
   trainingToggle: {
     cloud: "Train AI in the cloud",
     local: "Train AI on my own computer",
+    tooltip:
+      "In the cloud: we train the AI model on our own servers, you don't need to keep anything running. On your own computer: the model trains locally via the desktop app and then gets uploaded.",
   },
 
   botCard: {
@@ -66,6 +68,10 @@ export const en: Dictionary = {
 
     stopBot: "Stop bot",
     exchangeAccount: "Your account",
+    exchangeAccountTooltip:
+      "The exchange account this bot will eventually trade with. Only needed once you switch to real money — practicing already works without it.",
+    modeTooltip:
+      "Practice mode: the bot trades with fake money, purely to test things out. Real money: the bot trades with your own budget on your linked exchange account.",
     verified: "Verified",
     notVerified: "Not verified yet",
     noExchangeLinked: "Not linked yet — only needed to trade with real money, practicing works without it.",
@@ -123,6 +129,8 @@ export const en: Dictionary = {
     botNameLabel: "Bot name",
     botNamePlaceholder: "My first bot",
     aiBehaviorLabel: "How should your bot trade?",
+    aiBehaviorTooltip:
+      "Determines how cautious or active the AI is: how often it opens positions and how much risk it takes doing so. Can't be changed for this bot after this.",
     pairsLabel: "Which coins can it trade?",
     autoSelectLabel: "Let the AI pick the best coins automatically",
     recommended: "(Recommended)",

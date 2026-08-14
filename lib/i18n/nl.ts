@@ -43,6 +43,8 @@ export const nl = {
   trainingToggle: {
     cloud: "AI trainen in de cloud",
     local: "AI trainen op mijn eigen pc",
+    tooltip:
+      "In de cloud: wij trainen het AI-model op onze eigen servers, jij hoeft niets aan te laten staan. Op je eigen pc: het model wordt lokaal getraind via de desktop-app en daarna geüpload.",
   },
 
   botCard: {
@@ -67,6 +69,10 @@ export const nl = {
 
     stopBot: "Bot stoppen",
     exchangeAccount: "Je account",
+    exchangeAccountTooltip:
+      "Het exchange-account waarmee deze bot uiteindelijk kan handelen. Alleen nodig zodra je overstapt op echt geld — oefenen werkt hier al zonder.",
+    modeTooltip:
+      "Oefenmodus: de bot handelt met nepgeld, puur om te testen. Echt geld: de bot handelt met jouw eigen budget op je gekoppelde exchange-account.",
     verified: "Geverifieerd",
     notVerified: "Nog niet geverifieerd",
     noExchangeLinked: "Nog niet gekoppeld — alleen nodig om met echt geld te handelen, oefenen kan zonder.",
@@ -127,6 +133,8 @@ export const nl = {
     botNameLabel: "Botnaam",
     botNamePlaceholder: "Mijn eerste bot",
     aiBehaviorLabel: "Hoe moet je bot handelen?",
+    aiBehaviorTooltip:
+      "Bepaalt hoe voorzichtig of actief de AI handelt: hoe vaak hij posities opent en hoeveel risico hij daarbij neemt. Kan later niet meer gewijzigd worden voor deze bot.",
     pairsLabel: "Welke munten mag hij verhandelen?",
     autoSelectLabel: "Laat de AI automatisch de beste munten kiezen",
     recommended: "(Aanbevolen)",
