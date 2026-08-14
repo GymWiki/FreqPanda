@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { apiFetch, toErrorMessage } from "@/lib/api-client";
+import { useDictionary } from "@/components/I18nProvider";
+import type { Dictionary } from "@/lib/i18n/dictionary";
 
 interface TrainingProgressBarProps {
   jobId: string;
@@ -19,25 +21,27 @@ interface TrainingStatusResponse {
   errorMessage: string | null;
 }
 
-const STAGE_LABELS: Record<TrainingStage, string> = {
-  QUEUED: "In wachtrij…",
-  BOOTED: "Server opgestart…",
-  PULLING_IMAGE: "Server voorbereiden…",
-  DOWNLOADING_DATA: "Marktdata downloaden…",
-  TRAINING: "AI-model trainen…",
-  UPLOADING: "Model uploaden…",
-  DONE: "Training voltooid",
-};
+function stageLabels(dict: Dictionary): Record<TrainingStage, string> {
+  return {
+    QUEUED: dict.trainingProgress.stageQueued,
+    BOOTED: dict.trainingProgress.stageBooted,
+    PULLING_IMAGE: dict.trainingProgress.stagePullingImage,
+    DOWNLOADING_DATA: dict.trainingProgress.stageDownloadingData,
+    TRAINING: dict.trainingProgress.stageTraining,
+    UPLOADING: dict.trainingProgress.stageUploading,
+    DONE: dict.trainingProgress.stageDone,
+  };
+}
 
 const POLL_INTERVAL_MS = 4000;
 
-function formatDuration(seconds: number): string {
-  if (seconds < 60) return `${Math.max(0, Math.round(seconds))}s`;
+function formatDuration(dict: Dictionary, seconds: number): string {
+  if (seconds < 60) return dict.trainingProgress.durationSeconds(Math.max(0, Math.round(seconds)));
   const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes} min`;
+  if (minutes < 60) return dict.trainingProgress.durationMinutes(minutes);
   const hours = Math.floor(minutes / 60);
   const restMinutes = minutes % 60;
-  return `${hours}u ${restMinutes}min`;
+  return dict.trainingProgress.durationHoursMinutes(hours, restMinutes);
 }
 
 // Polls GET /api/train/cloud/status (see that route for how percent/ETA are
@@ -51,6 +55,7 @@ function formatDuration(seconds: number): string {
 // unmounts this component shortly after anyway once bot.latestTrainingJob
 // catches up.
 export function TrainingProgressBar({ jobId }: TrainingProgressBarProps) {
+  const dict = useDictionary();
   const [data, setData] = useState<TrainingStatusResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -75,7 +80,7 @@ export function TrainingProgressBar({ jobId }: TrainingProgressBarProps) {
         }
       } catch (err) {
         if (controller.signal.aborted) return;
-        setError(toErrorMessage(err, "Kon voortgang niet laden"));
+        setError(toErrorMessage(err, dict.trainingProgress.loadFailed));
       }
     }
 
@@ -104,7 +109,7 @@ export function TrainingProgressBar({ jobId }: TrainingProgressBarProps) {
     <div className="space-y-1.5">
       <div className="flex items-center justify-between text-[11px]">
         <span className={isFailed ? "text-red-400" : isCancelled ? "text-slate-400" : isDone ? "text-primary" : "text-slate-400"}>
-          {isFailed ? "Training mislukt" : isCancelled ? "Training gestopt" : STAGE_LABELS[data.stage]}
+          {isFailed ? dict.trainingProgress.failed : isCancelled ? dict.trainingProgress.cancelled : stageLabels(dict)[data.stage]}
         </span>
         <span className="tabular-nums text-slate-500">{isDone ? 100 : data.percentComplete}%</span>
       </div>
@@ -115,17 +120,17 @@ export function TrainingProgressBar({ jobId }: TrainingProgressBarProps) {
         />
       </div>
       {!isDone && !isTerminalWithIssue && data.estimatedRemainingSeconds !== null && (
-        <p className="text-[11px] text-slate-500">Nog ongeveer {formatDuration(data.estimatedRemainingSeconds)}</p>
-      )}
-      {/* Marktdata downloaden voor een bot met automatische coin-selectie
-          kan realistisch tot ~2 uur duren (elk actief USDT-paar op de
-          exchange, niet alleen de paren die uiteindelijk verhandeld
-          worden) — zonder deze toelichting oogt een percentage dat een
-          tijdlang nauwelijks beweegt al snel als vastgelopen. */}
-      {!isDone && !isTerminalWithIssue && data.stage === "DOWNLOADING_DATA" && (
         <p className="text-[11px] text-slate-500">
-          Dit kan bij automatische coin-selectie realistisch tot ~2 uur duren.
+          {dict.trainingProgress.remaining(formatDuration(dict, data.estimatedRemainingSeconds))}
         </p>
+      )}
+      {/* Downloading market data for a bot with automatic coin selection can
+          realistically take up to ~2 hours (every active USDT pair on the
+          exchange, not only the pairs eventually traded) — without this
+          note a percentage that barely moves for a while quickly reads as
+          stuck. */}
+      {!isDone && !isTerminalWithIssue && data.stage === "DOWNLOADING_DATA" && (
+        <p className="text-[11px] text-slate-500">{dict.trainingProgress.longRunningHint}</p>
       )}
       {/* Full message, wrapped — never truncated. A reap/callback reason
           like "Reaped: no progress past QUEUED for over 20 minutes — ..."

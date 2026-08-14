@@ -1,6 +1,7 @@
 import { Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { DeploymentStatus, TrainingStatus } from "@/lib/types";
+import { useDictionary } from "@/components/I18nProvider";
 
 const STYLES: Record<DeploymentStatus, string> = {
   LOCAL: "bg-slate-500/10 text-slate-300 border-slate-500/30",
@@ -8,19 +9,19 @@ const STYLES: Record<DeploymentStatus, string> = {
   INACTIVE: "bg-slate-700/30 text-slate-500 border-slate-600/30",
 };
 
-const LABELS: Record<DeploymentStatus, string> = {
-  LOCAL: "Local only",
-  VPS_ACTIVE: "Live on VPS",
-  INACTIVE: "Inactive",
-};
-
 export function StatusBadge({ status }: { status: DeploymentStatus }) {
+  const dict = useDictionary();
+  const labels: Record<DeploymentStatus, string> = {
+    LOCAL: dict.statusBadge.local,
+    VPS_ACTIVE: dict.statusBadge.liveOnVps,
+    INACTIVE: dict.statusBadge.inactive,
+  };
   return (
     <span className={cn("rounded-full border px-2.5 py-0.5 text-[11px] font-medium", STYLES[status])}>
       {status === "VPS_ACTIVE" && (
         <span className="mr-1.5 inline-block h-1.5 w-1.5 rounded-full bg-primary align-middle" />
       )}
-      {LABELS[status]}
+      {labels[status]}
     </span>
   );
 }
@@ -33,15 +34,15 @@ const TRAINING_STYLES: Record<TrainingStatus, string> = {
   CANCELLED: "bg-slate-500/10 text-slate-400 border-slate-500/30",
 };
 
-const TRAINING_LABELS: Record<TrainingStatus, string> = {
-  QUEUED: "Queued",
-  TRAINING: "Training…",
-  COMPLETED: "Training complete",
-  FAILED: "Training failed",
-  CANCELLED: "Training gestopt",
-};
-
 export function TrainingStatusBadge({ status }: { status: TrainingStatus }) {
+  const dict = useDictionary();
+  const labels: Record<TrainingStatus, string> = {
+    QUEUED: dict.statusBadge.trainingQueued,
+    TRAINING: dict.statusBadge.training,
+    COMPLETED: dict.statusBadge.trainingComplete,
+    FAILED: dict.statusBadge.trainingFailed,
+    CANCELLED: dict.statusBadge.trainingCancelled,
+  };
   return (
     <span
       className={cn(
@@ -50,7 +51,7 @@ export function TrainingStatusBadge({ status }: { status: TrainingStatus }) {
       )}
     >
       {(status === "QUEUED" || status === "TRAINING") && <Loader2 className="h-3 w-3 animate-spin" />}
-      {TRAINING_LABELS[status]}
+      {labels[status]}
     </span>
   );
 }

@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { ArrowDownRight, ArrowUpRight, History, Loader2, MinusCircle } from "lucide-react";
 import { apiFetch, toErrorMessage } from "@/lib/api-client";
+import { useDictionary } from "@/components/I18nProvider";
 
 interface HumanizedTrade {
   id: number;
@@ -46,6 +47,7 @@ function formatRelative(isoDate: string): string {
 // nothing fetches until the user actually opens the section, since most
 // bots on the dashboard are never expanded in a given visit.
 export function TradeHistoryFeed({ botId }: TradeHistoryFeedProps) {
+  const dict = useDictionary();
   const [isOpen, setIsOpen] = useState(false);
   const [trades, setTrades] = useState<HumanizedTrade[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -61,7 +63,7 @@ export function TradeHistoryFeed({ botId }: TradeHistoryFeedProps) {
       .then((data) => setTrades(data.trades))
       .catch((err) => {
         if (controller.signal.aborted) return;
-        setError(toErrorMessage(err, "Kon trade-historie niet laden"));
+        setError(toErrorMessage(err, dict.tradeHistory.loadFailed));
       })
       .finally(() => {
         if (!controller.signal.aborted) setIsLoading(false);
@@ -80,9 +82,9 @@ export function TradeHistoryFeed({ botId }: TradeHistoryFeedProps) {
       >
         <span className="flex items-center gap-1.5">
           <History className="h-3.5 w-3.5" />
-          Trade geschiedenis
+          {dict.tradeHistory.heading}
         </span>
-        <span className="text-slate-500">{isOpen ? "verbergen" : "tonen"}</span>
+        <span className="text-slate-500">{isOpen ? dict.tradeHistory.hide : dict.tradeHistory.show}</span>
       </button>
 
       {isOpen && (
@@ -96,7 +98,7 @@ export function TradeHistoryFeed({ botId }: TradeHistoryFeedProps) {
           {error && <p className="py-2 text-xs text-red-400">{error}</p>}
 
           {trades && trades.length === 0 && (
-            <p className="py-2 text-xs text-slate-500">Nog geen trades — de bot heeft nog geen positie gesloten.</p>
+            <p className="py-2 text-xs text-slate-500">{dict.tradeHistory.empty}</p>
           )}
 
           {trades && trades.length > 0 && (

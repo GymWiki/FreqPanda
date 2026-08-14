@@ -8,6 +8,7 @@ import { EXCHANGE_PRESETS } from "@/lib/exchange-presets";
 import type { ExchangeConnectionDTO } from "@/lib/types";
 import type { FreeBalance } from "@/lib/ccxt-client";
 import { apiFetch, toErrorMessage } from "@/lib/api-client";
+import { useDictionary } from "@/components/I18nProvider";
 
 interface ConnectExchangeDialogProps {
   botId: string;
@@ -30,6 +31,7 @@ interface ConnectExchangeDialogProps {
 // real balance call before saving anything — see
 // app/api/bots/[id]/exchange-connection.
 export function ConnectExchangeDialog({ botId, botName, exchangeName, onConnected, onClose }: ConnectExchangeDialogProps) {
+  const dict = useDictionary();
   const [apiKey, setApiKey] = useState("");
   const [apiSecret, setApiSecret] = useState("");
   const [pickedExchangeName, setPickedExchangeName] = useState(exchangeName ?? EXCHANGE_PRESETS[0].id);
@@ -59,7 +61,7 @@ export function ConnectExchangeDialog({ botId, botName, exchangeName, onConnecte
       onConnected(data.connection);
       onClose();
     } catch (err) {
-      setError(toErrorMessage(err, "Koppelen is mislukt"));
+      setError(toErrorMessage(err, dict.connectExchange.connectFailed));
     } finally {
       setIsSubmitting(false);
     }
@@ -70,12 +72,12 @@ export function ConnectExchangeDialog({ botId, botName, exchangeName, onConnecte
       <div className="card-surface flex max-h-[90vh] w-full max-w-md flex-col p-6">
         <div className="mb-4 flex shrink-0 items-center justify-between">
           <div>
-            <h2 className="font-semibold">Exchange-account koppelen</h2>
+            <h2 className="font-semibold">{dict.connectExchange.heading}</h2>
             <p className="text-xs text-slate-400">
               {exchangeName
-                ? `Voor ${botName} op ${preset?.label ?? exchangeName}`
-                : `Voor ${botName} — kies eerst de exchange`}{" "}
-              — alleen voor deze bot, niet gedeeld met andere bots.
+                ? dict.connectExchange.subtitleWithExchange(botName, preset?.label ?? exchangeName)
+                : dict.connectExchange.subtitleWithoutExchange(botName)}
+              {dict.connectExchange.subtitleSuffix}
             </p>
           </div>
           <button
@@ -92,10 +94,14 @@ export function ConnectExchangeDialog({ botId, botName, exchangeName, onConnecte
             {exchangeName === null && (
               <label className="block">
                 <span className="mb-1 flex items-center gap-1.5 text-xs font-medium text-slate-400">
-                  Exchange
-                  <InfoTooltip text="Welke exchange dit account bij hoort. Kan hierna niet meer gewijzigd worden voor deze bot." />
+                  {dict.connectExchange.exchangeLabel}
+                  <InfoTooltip text={dict.connectExchange.exchangeHint} />
                 </span>
-                <ExchangeCombobox value={pickedExchangeName} onChange={setPickedExchangeName} aria-label="Exchange" />
+                <ExchangeCombobox
+                  value={pickedExchangeName}
+                  onChange={setPickedExchangeName}
+                  aria-label={dict.connectExchange.exchangeLabel}
+                />
               </label>
             )}
 
@@ -107,8 +113,8 @@ export function ConnectExchangeDialog({ botId, botName, exchangeName, onConnecte
 
             <label className="block">
               <span className="mb-1 flex items-center gap-1.5 text-xs font-medium text-slate-400">
-                API-key
-                <InfoTooltip text="Te vinden in de instellingen van je exchange-account. Geef deze key alleen trading-rechten, nooit opname-rechten (withdraw)." />
+                {dict.connectExchange.apiKeyLabel}
+                <InfoTooltip text={dict.connectExchange.apiKeyHint} />
               </span>
               <input
                 required
@@ -117,14 +123,14 @@ export function ConnectExchangeDialog({ botId, botName, exchangeName, onConnecte
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
                 className="input"
-                placeholder="••••••••••••"
+                placeholder={dict.connectExchange.secretPlaceholder}
               />
             </label>
 
             <label className="block">
               <span className="mb-1 flex items-center gap-1.5 text-xs font-medium text-slate-400">
-                API-secret
-                <InfoTooltip text="Het bijbehorende geheime deel van je API-key. Wordt versleuteld opgeslagen en nooit getoond." />
+                {dict.connectExchange.apiSecretLabel}
+                <InfoTooltip text={dict.connectExchange.apiSecretHint} />
               </span>
               <input
                 required
@@ -133,7 +139,7 @@ export function ConnectExchangeDialog({ botId, botName, exchangeName, onConnecte
                 value={apiSecret}
                 onChange={(e) => setApiSecret(e.target.value)}
                 className="input"
-                placeholder="••••••••••••"
+                placeholder={dict.connectExchange.secretPlaceholder}
               />
             </label>
 
@@ -150,7 +156,7 @@ export function ConnectExchangeDialog({ botId, botName, exchangeName, onConnecte
             className="mt-4 flex w-full shrink-0 items-center justify-center gap-2 rounded-lg bg-primary px-4 py-3 text-sm font-semibold text-background transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
           >
             {isSubmitting && <Loader2 className="h-4 w-4 animate-spin" />}
-            {isSubmitting ? "Verifiëren…" : "Koppelen"}
+            {isSubmitting ? dict.connectExchange.verifying : dict.connectExchange.submit}
           </button>
         </form>
       </div>

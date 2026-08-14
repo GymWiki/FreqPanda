@@ -36,6 +36,7 @@ import { EXCHANGE_PRESETS } from "@/lib/exchange-presets";
 import { DEFAULT_PAPER_TOTAL_BUDGET, DEFAULT_PAPER_MAX_STAKE_PERCENTAGE } from "@/lib/paper-trading-defaults";
 import { isTauri } from "@/lib/tauri";
 import { apiFetch, toErrorMessage } from "@/lib/api-client";
+import { useDictionary } from "@/components/I18nProvider";
 
 interface BotCardProps {
   bot: BotConfigurationDTO;
@@ -44,6 +45,7 @@ interface BotCardProps {
 }
 
 export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
+  const dict = useDictionary();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [isDeploying, setIsDeploying] = useState(false);
@@ -112,7 +114,7 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
       const data = await apiFetch<{ bot: BotConfigurationDTO }>(`/api/bots/${bot.id}/resume`, { method: "POST" });
       onUpdate(data.bot);
     } catch (err) {
-      setError(toErrorMessage(err, "Hervatten is mislukt"));
+      setError(toErrorMessage(err, dict.botCard.resumeFailed));
     } finally {
       setIsResuming(false);
     }
@@ -125,11 +127,7 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
   // action, unlike the heavier custom modal the global Panic Button (a
   // real-money, force-close action across every bot) warrants.
   async function handleStop() {
-    if (
-      !confirm(
-        `${bot.botName} stoppen? Er worden geen nieuwe posities meer geopend — bestaande open posities blijven gewoon lopen. Je kan de bot daarna weer hervatten.`,
-      )
-    ) {
+    if (!confirm(dict.botCard.confirmStop(bot.botName))) {
       return;
     }
     setError(null);
@@ -138,7 +136,7 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
       const data = await apiFetch<{ bot: BotConfigurationDTO }>(`/api/bots/${bot.id}/stop`, { method: "POST" });
       onUpdate(data.bot);
     } catch (err) {
-      setError(toErrorMessage(err, "Stoppen is mislukt"));
+      setError(toErrorMessage(err, dict.botCard.stopFailed));
     } finally {
       setIsStopping(false);
     }
@@ -158,7 +156,7 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
       });
       onUpdate(data.bot);
     } catch (err) {
-      setError(toErrorMessage(err, "Failed to update training mode"));
+      setError(toErrorMessage(err, dict.botCard.trainingModeUpdateFailed));
     } finally {
       setOptimisticTrainingMode(null);
       setIsTogglingTrainingMode(false);
@@ -183,7 +181,7 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
       });
       onUpdate(data.bot);
     } catch (err) {
-      setError(toErrorMessage(err, "Kon auto-compounding niet wijzigen"));
+      setError(toErrorMessage(err, dict.botCard.autoCompoundUpdateFailed));
     } finally {
       setOptimisticAutoCompound(null);
       setIsTogglingAutoCompound(false);
@@ -201,7 +199,7 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
       const data = await apiFetch<{ aiModelPath: string }>("/api/upload", { method: "POST", body: formData });
       onUpdate({ ...bot, aiModelPath: data.aiModelPath });
     } catch (err) {
-      setError(toErrorMessage(err, "Upload failed"));
+      setError(toErrorMessage(err, dict.botCard.uploadFailed));
     } finally {
       setIsUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
@@ -239,7 +237,7 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
       const file = new File([new Uint8Array(bytes)], filename, { type: "application/octet-stream" });
       await handleFileSelected(file);
     } catch (err) {
-      setError(toErrorMessage(err, "Local training failed"));
+      setError(toErrorMessage(err, dict.botCard.localTrainingFailed));
     } finally {
       setIsTrainingLocally(false);
     }
@@ -282,7 +280,7 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
       if (justStartedCloudTrainingTimeout.current) clearTimeout(justStartedCloudTrainingTimeout.current);
       justStartedCloudTrainingTimeout.current = setTimeout(() => setJustStartedCloudTraining(false), 6000);
     } catch (err) {
-      setError(toErrorMessage(err, "Failed to start cloud training"));
+      setError(toErrorMessage(err, dict.botCard.cloudTrainingFailed));
     } finally {
       setIsStartingCloudTraining(false);
     }
@@ -296,7 +294,7 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
   // there's nothing extra to do here to "stop polling".
   async function handleStopTraining() {
     if (!bot.latestTrainingJob) return;
-    if (!confirm("Weet je zeker dat je de training wilt stoppen? De cloud-server wordt direct verwijderd.")) {
+    if (!confirm(dict.botCard.confirmStopTraining)) {
       return;
     }
     setError(null);
@@ -309,7 +307,7 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
       });
       onUpdate(data.bot);
     } catch (err) {
-      setError(toErrorMessage(err, "Stoppen van de training is mislukt"));
+      setError(toErrorMessage(err, dict.botCard.stopTrainingFailed));
     } finally {
       setIsStoppingTraining(false);
     }
@@ -332,7 +330,7 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
       },
       dry_run: bot.isPaperTrading,
       ai_model_path: bot.aiModelPath ?? null,
-      note: "Fill in your exchange API key/secret locally — they are never exported from the dashboard.",
+      note: dict.botCard.localConfigNote,
     };
     const blob = new Blob([JSON.stringify(config, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -365,7 +363,7 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
       if (data.bot) onUpdate(data.bot);
       if (data.apiCredentials) setApiCredentials(data.apiCredentials);
     } catch (err) {
-      setError(toErrorMessage(err, "Deploy failed"));
+      setError(toErrorMessage(err, dict.botCard.deployFailed));
     } finally {
       setIsDeploying(false);
     }
@@ -378,7 +376,7 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
       const data = await apiFetch<{ username: string; password: string }>(`/api/bots/${bot.id}/credentials`);
       setApiCredentials(data);
     } catch (err) {
-      setError(toErrorMessage(err, "Could not load credentials"));
+      setError(toErrorMessage(err, dict.botCard.loadCredentialsFailed));
     } finally {
       setIsRevealingCredentials(false);
     }
@@ -391,27 +389,27 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
   }
 
   async function handleDelete() {
-    if (!confirm(`Remove ${bot.botName}? This cannot be undone.`)) return;
+    if (!confirm(dict.botCard.confirmRemove(bot.botName))) return;
     setError(null);
     setIsDeleting(true);
     try {
       await apiFetch(`/api/bots/${bot.id}`, { method: "DELETE" });
       onDelete(bot.id);
     } catch (err) {
-      setError(toErrorMessage(err, "Failed to remove bot"));
+      setError(toErrorMessage(err, dict.botCard.removeFailed));
       setIsDeleting(false);
     }
   }
 
   async function handleDisconnectExchange() {
-    if (!confirm("Exchange-account ontkoppelen van deze bot?")) return;
+    if (!confirm(dict.botCard.confirmDisconnectExchange)) return;
     setError(null);
     setIsDisconnectingExchange(true);
     try {
       await apiFetch(`/api/bots/${bot.id}/exchange-connection`, { method: "DELETE" });
       onUpdate({ ...bot, exchangeConnection: null });
     } catch (err) {
-      setError(toErrorMessage(err, "Ontkoppelen is mislukt"));
+      setError(toErrorMessage(err, dict.botCard.disconnectFailed));
     } finally {
       setIsDisconnectingExchange(false);
     }
@@ -428,12 +426,14 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
           </p>
           {bot.totalBudget !== null && bot.maxStakePercentage !== null ? (
             <p className="mt-0.5 text-[11px] text-slate-500">
-              Budget: €{bot.totalBudget.toLocaleString("nl-NL")} &middot; max €
-              {((bot.totalBudget * bot.maxStakePercentage) / 100).toLocaleString("nl-NL", { maximumFractionDigits: 2 })} per
-              trade ({bot.maxStakePercentage}%)
+              {dict.botCard.budgetLine(
+                bot.totalBudget,
+                Number(((bot.totalBudget * bot.maxStakePercentage) / 100).toFixed(2)),
+                bot.maxStakePercentage,
+              )}
             </p>
           ) : (
-            <p className="mt-0.5 text-[11px] text-slate-500">Paper trading — nog geen live budget ingesteld</p>
+            <p className="mt-0.5 text-[11px] text-slate-500">{dict.botCard.noBudgetYet}</p>
           )}
         </div>
         <div className="flex shrink-0 flex-col items-end gap-1.5">
@@ -446,7 +446,7 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
               className="flex items-center gap-1 rounded-md border border-amber-500/40 px-2 py-1 text-[11px] font-medium text-amber-400 transition hover:bg-amber-500/10 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {isStopping ? <Loader2 className="h-3 w-3 animate-spin" /> : <PauseCircle className="h-3 w-3" />}
-              Stop bot
+              {dict.botCard.stopBot}
             </button>
           )}
         </div>
@@ -454,18 +454,18 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
 
       <div className="flex items-center justify-between gap-3 rounded-lg bg-background px-3 py-2">
         <div className="min-w-0">
-          <p className="text-xs font-medium text-slate-200">Exchange-account</p>
+          <p className="text-xs font-medium text-slate-200">{dict.botCard.exchangeAccount}</p>
           {bot.exchangeConnection ? (
             <p className="mt-0.5 flex items-center gap-1 text-[11px]">
               {bot.exchangeConnection.verified ? (
                 <>
                   <ShieldCheck className="h-3 w-3 shrink-0 text-primary" />
-                  <span className="text-primary">Geverifieerd</span>
+                  <span className="text-primary">{dict.botCard.verified}</span>
                 </>
               ) : (
                 <>
                   <ShieldAlert className="h-3 w-3 shrink-0 text-amber-400" />
-                  <span className="text-amber-400">Niet geverifieerd</span>
+                  <span className="text-amber-400">{dict.botCard.notVerified}</span>
                 </>
               )}
               <span className="text-slate-500">
@@ -473,9 +473,7 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
               </span>
             </p>
           ) : (
-            <p className="mt-0.5 text-[11px] text-slate-500">
-              Nog niet gekoppeld — alleen nodig om live te gaan, training/paper trading werkt zonder.
-            </p>
+            <p className="mt-0.5 text-[11px] text-slate-500">{dict.botCard.noExchangeLinked}</p>
           )}
         </div>
         {bot.exchangeConnection ? (
@@ -485,7 +483,7 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
               onClick={() => setIsConnectExchangeOpen(true)}
               className="rounded-md border border-border px-2.5 py-1 text-[11px] font-medium text-slate-300 transition hover:border-primary hover:text-primary"
             >
-              Vervang
+              {dict.botCard.replaceAccount}
             </button>
             <button
               type="button"
@@ -494,7 +492,7 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
               className="flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-[11px] font-medium text-slate-300 transition hover:border-red-500/50 hover:text-red-400 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {isDisconnectingExchange ? <Loader2 className="h-3 w-3 animate-spin" /> : <Unlink className="h-3 w-3" />}
-              Ontkoppel
+              {dict.botCard.disconnectAccount}
             </button>
           </div>
         ) : (
@@ -504,7 +502,7 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
             className="flex shrink-0 items-center gap-1.5 rounded-md bg-primary px-2.5 py-1.5 text-[11px] font-semibold text-background transition hover:bg-primary-hover"
           >
             <Link2 className="h-3 w-3" />
-            Koppel exchange account
+            {dict.botCard.connectAccount}
           </button>
         )}
       </div>
@@ -521,16 +519,14 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
 
       <div className="flex items-center justify-between gap-3 rounded-lg bg-background px-3 py-2">
         <div className="min-w-0">
-          <p className="text-xs font-medium text-slate-200">Auto-Compounding</p>
-          <p className="text-[11px] text-slate-500">
-            Herinvesteer winst automatisch in grotere posities — actief vanaf de volgende (re)deploy.
-          </p>
+          <p className="text-xs font-medium text-slate-200">{dict.botCard.autoCompound}</p>
+          <p className="text-[11px] text-slate-500">{dict.botCard.autoCompoundHint}</p>
         </div>
         <Switch
           checked={optimisticAutoCompound ?? bot.autoCompound}
           onChange={handleAutoCompoundChange}
           disabled={isTogglingAutoCompound}
-          aria-label="Auto-Compounding"
+          aria-label={dict.botCard.autoCompound}
         />
       </div>
 
@@ -545,10 +541,10 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
               <PauseCircle className="h-3.5 w-3.5 shrink-0" />
             )}
             {bot.status === "PAUSED_EMERGENCY"
-              ? "Noodstop actief"
+              ? dict.botCard.emergencyStopped
               : bot.status === "SLEEPING"
-                ? "In slaapstand — even geen activiteit"
-                : "Gestopt — bestaande posities blijven gewoon lopen"}
+                ? dict.botCard.sleeping
+                : dict.botCard.manuallyStopped}
           </div>
           {bot.lastError && <p className="text-amber-200/80">{bot.lastError}</p>}
           <button
@@ -558,7 +554,7 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
             className="flex items-center justify-center gap-1.5 self-start rounded-md bg-amber-500 px-2.5 py-1 text-[11px] font-semibold text-background transition hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {isResuming ? <Loader2 className="h-3 w-3 animate-spin" /> : <PlayCircle className="h-3 w-3" />}
-            Hervat bot
+            {dict.botCard.resume}
           </button>
         </div>
       )}
@@ -578,7 +574,9 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
             PAUSED_MANUAL is the one exception: the user explicitly asked
             this pill itself to read "Gestopt" instead of "Paper Trading"/
             "Live Trading" while a bot is individually stopped. */}
-        <span>{bot.status === "PAUSED_MANUAL" ? "Gestopt" : bot.isPaperTrading ? "Paper Trading" : "Live Trading"}</span>
+        <span>
+          {bot.status === "PAUSED_MANUAL" ? dict.botCard.stoppedLabel : bot.isPaperTrading ? dict.botCard.practiceMode : dict.botCard.realMoney}
+        </span>
         {canGoLive && (
           <button
             type="button"
@@ -586,7 +584,7 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
             className="flex items-center gap-1.5 rounded-md bg-emerald-500 px-2.5 py-1 text-[11px] font-semibold text-background transition hover:bg-emerald-400"
           >
             <Zap className="h-3 w-3" />
-            Activeer Live Trading
+            {dict.botCard.goLive}
           </button>
         )}
       </div>
@@ -605,7 +603,7 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
       {justStartedCloudTraining && (
         <div className="flex items-center gap-2 rounded-lg border border-primary/40 bg-primary/10 px-3 py-2.5 text-xs font-medium text-primary">
           <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-          Cloud training gestart voor {bot.botName} — dit kan een tijdje duren.
+          {dict.botCard.cloudTrainingStarted(bot.botName)}
         </div>
       )}
 
@@ -645,7 +643,7 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
               ) : (
                 <Cloud className="h-3.5 w-3.5" />
               )}
-              {jobActive ? "Training in de cloud…" : "Start Cloud Training"}
+              {jobActive ? dict.botCard.trainingInCloud : dict.botCard.startCloudTraining}
             </button>
             {/* Own polling loop, distinct from BotFleetGrid's slower
                 fleet-wide refresh — see that component's doc comment. */}
@@ -659,7 +657,7 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
                   className="flex w-full items-center justify-center gap-2 rounded-lg border border-red-500/40 px-3 py-2 text-xs font-medium text-red-400 transition hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {isStoppingTraining ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <XCircle className="h-3.5 w-3.5" />}
-                  {isStoppingTraining ? "Wordt gestopt…" : "Stop training"}
+                  {isStoppingTraining ? dict.botCard.stoppingTraining : dict.botCard.stopTraining}
                 </button>
               </>
             )}
@@ -672,11 +670,11 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
             className="flex w-full items-center justify-center gap-2 rounded-lg border border-primary/40 px-3 py-2 text-xs font-medium text-primary transition hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {isTrainingLocally ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Laptop className="h-3.5 w-3.5" />}
-            {isTrainingLocally ? "Training locally…" : "Start Local Training"}
+            {isTrainingLocally ? dict.botCard.trainingLocally : dict.botCard.startLocalTraining}
           </button>
         ) : (
           <p className="rounded-lg bg-background px-3 py-2 text-[11px] text-slate-500">
-            Local training needs the Desktop App — download it from the landing page, or switch to Cloud Training.
+            {dict.botCard.localTrainingNeedsApp}
           </p>
         )}
       </div>
@@ -705,7 +703,7 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
           ) : (
             <Upload className="h-3.5 w-3.5" />
           )}
-          {bot.aiModelPath ? "Model uploaded — replace manually" : "Or upload a .joblib model manually"}
+          {bot.aiModelPath ? dict.botCard.modelUploaded : dict.botCard.orUploadManually}
         </button>
       </div>
 
@@ -720,7 +718,7 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
           className="flex items-center justify-center gap-1.5 rounded-lg border border-border px-3 py-2 text-xs font-medium text-slate-200 transition hover:border-primary hover:text-primary"
         >
           <Download className="h-3.5 w-3.5" />
-          Local Config
+          {dict.botCard.localConfig}
         </button>
         <button
           type="button"
@@ -733,7 +731,7 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
           ) : (
             <Rocket className="h-3.5 w-3.5" />
           )}
-          {bot.deploymentStatus === "VPS_ACTIVE" ? "Deployed" : "Deploy to Cloud"}
+          {bot.deploymentStatus === "VPS_ACTIVE" ? dict.botCard.deployed : dict.botCard.deployToCloud}
         </button>
       </div>
 
@@ -749,19 +747,29 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
           ) : (
             <KeyRound className="h-3 w-3" />
           )}
-          Show API credentials
+          {dict.botCard.showCredentials}
         </button>
       )}
 
       {apiCredentials && (
         <div className="space-y-2 rounded-lg border border-primary/30 bg-primary/5 p-3 text-[11px]">
-          <p className="text-slate-300">
-            Freqtrade REST API on{" "}
-            <span className="font-mono text-primary">{bot.hetznerServerIp ?? "?"}:8080</span> — save these now,
-            they won&apos;t be shown in full again after you navigate away.
-          </p>
-          <CredentialRow label="Username" value={apiCredentials.username} field="username" onCopy={handleCopy} copied={copiedField === "username"} />
-          <CredentialRow label="Password" value={apiCredentials.password} field="password" onCopy={handleCopy} copied={copiedField === "password"} />
+          <p className="text-slate-300">{dict.botCard.apiCredentialsHint(bot.hetznerServerIp ?? "?")}</p>
+          <CredentialRow
+            label={dict.botCard.username}
+            value={apiCredentials.username}
+            field="username"
+            onCopy={handleCopy}
+            copied={copiedField === "username"}
+            copyLabel={dict.botCard.copyLabel(dict.botCard.username)}
+          />
+          <CredentialRow
+            label={dict.botCard.password}
+            value={apiCredentials.password}
+            field="password"
+            onCopy={handleCopy}
+            copied={copiedField === "password"}
+            copyLabel={dict.botCard.copyLabel(dict.botCard.password)}
+          />
         </div>
       )}
 
@@ -772,7 +780,7 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
         className="flex items-center justify-center gap-1.5 text-[11px] text-slate-500 transition hover:text-red-400 disabled:cursor-not-allowed disabled:opacity-50"
       >
         {isDeleting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
-        Remove bot
+        {dict.botCard.removeBot}
       </button>
     </div>
   );
@@ -784,9 +792,10 @@ interface CredentialRowProps {
   field: "username" | "password";
   copied: boolean;
   onCopy: (field: "username" | "password", value: string) => void;
+  copyLabel: string;
 }
 
-function CredentialRow({ label, value, field, copied, onCopy }: CredentialRowProps) {
+function CredentialRow({ label, value, field, copied, onCopy, copyLabel }: CredentialRowProps) {
   return (
     <div className="flex items-center justify-between gap-2 rounded-md bg-background px-2 py-1.5">
       <div className="min-w-0">
@@ -797,7 +806,7 @@ function CredentialRow({ label, value, field, copied, onCopy }: CredentialRowPro
         type="button"
         onClick={() => onCopy(field, value)}
         className="shrink-0 rounded-md border border-border p-1.5 text-slate-400 transition hover:border-primary hover:text-primary"
-        title={`Copy ${label.toLowerCase()}`}
+        title={copyLabel}
       >
         {copied ? <Check className="h-3 w-3 text-primary" /> : <Copy className="h-3 w-3" />}
       </button>

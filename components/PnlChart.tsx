@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis } from "recharts";
 import { Loader2, TrendingUp } from "lucide-react";
 import { apiFetch, toErrorMessage } from "@/lib/api-client";
+import { useDictionary } from "@/components/I18nProvider";
 
 interface PnlPoint {
   date: string;
@@ -36,6 +37,7 @@ function CustomTooltip({ active, payload, label }: { active?: boolean; payload?:
 // series needs no legend; the hero number above the chart carries the
 // headline, the crosshair tooltip carries every point's exact value.
 export function PnlChart() {
+  const dict = useDictionary();
   const [points, setPoints] = useState<PnlPoint[] | null>(null);
   const [totalProfit, setTotalProfit] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -51,7 +53,7 @@ export function PnlChart() {
       })
       .catch((err) => {
         if (controller.signal.aborted) return;
-        setError(toErrorMessage(err, "Kon portfolio-waarde niet laden"));
+        setError(toErrorMessage(err, dict.pnl.loadFailed));
       });
     return () => controller.abort();
   }, []);
@@ -85,7 +87,7 @@ export function PnlChart() {
       <div className="mb-3 flex items-baseline justify-between">
         <div className="flex items-center gap-1.5 text-xs text-slate-500">
           <TrendingUp className="h-3.5 w-3.5" />
-          Portfolio-winst (alle bots)
+          {dict.pnl.heading}
         </div>
         <span className={`text-xl font-semibold ${isPositive ? "text-primary" : "text-red-400"}`}>
           {formatUsd(totalProfit)}

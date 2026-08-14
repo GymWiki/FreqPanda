@@ -4,15 +4,18 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Bot, Settings } from "lucide-react";
 import { cn } from "@/lib/utils";
+import type { Dictionary } from "@/lib/i18n";
 
 // Exchange-account management moved from its own global "Platformen" tab
 // into each bot's own card (see components/BotCard.tsx, components/
 // ConnectExchangeDialog.tsx) — there's no longer a bot-independent
 // "platforms" screen for this tab to point at.
-const TABS = [
-  { href: "/dashboard", label: "Bots", icon: Bot },
-  { href: "/settings", label: "Instellingen", icon: Settings },
-] as const;
+function tabs(dict: Dictionary) {
+  return [
+    { href: "/dashboard", label: dict.nav.myBots, icon: Bot },
+    { href: "/settings", label: dict.nav.settings, icon: Settings },
+  ] as const;
+}
 
 // The mobile alternative to a sidebar (per the design brief: no complex
 // sidebars on small screens) — fixed to the viewport bottom, thumb reach
@@ -23,8 +26,15 @@ const TABS = [
 // marketing page also renders <Navbar />), and this nav's own destinations
 // don't include it, so it stays hidden there and only appears once the
 // user has actually navigated into one of the three tabs below.
-export function BottomNav() {
+//
+// dict comes as a prop from Navbar (a server component that already
+// resolves its own — see that component's own doc comment) rather than
+// via useDictionary(): this component can render on pages that never set
+// up an <I18nProvider> at all (Navbar renders on "/", the public marketing
+// page, too), so it can't assume that context exists.
+export function BottomNav({ dict }: { dict: Dictionary }) {
   const pathname = usePathname();
+  const TABS = tabs(dict);
   const isOnAppRoute = TABS.some(({ href }) => pathname === href || pathname.startsWith(`${href}/`));
   if (!isOnAppRoute) return null;
 

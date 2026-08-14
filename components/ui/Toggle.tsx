@@ -1,6 +1,7 @@
 "use client";
 
 import { cn } from "@/lib/utils";
+import { useDictionary } from "@/components/I18nProvider";
 
 interface TrainingModeToggleProps {
   mode: "LOCAL" | "CLOUD";
@@ -9,6 +10,7 @@ interface TrainingModeToggleProps {
 }
 
 export function TrainingModeToggle({ mode, onChange, disabled }: TrainingModeToggleProps) {
+  const dict = useDictionary();
   const isCloud = mode === "CLOUD";
   return (
     <button
@@ -26,7 +28,7 @@ export function TrainingModeToggle({ mode, onChange, disabled }: TrainingModeTog
         "flex w-full items-center justify-between rounded-lg border border-primary/40 bg-primary/10 px-3 py-2 text-xs font-medium text-primary transition disabled:cursor-not-allowed disabled:opacity-50"
       }
     >
-      <span>{isCloud ? "Train in the Cloud" : "Train op mijn Windows-pc"}</span>
+      <span>{isCloud ? dict.trainingToggle.cloud : dict.trainingToggle.local}</span>
       <span className={cn("relative h-5 w-9 shrink-0 rounded-full transition", isCloud ? "bg-primary" : "bg-border")}>
         <span
           className={cn(

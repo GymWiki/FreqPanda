@@ -3,6 +3,7 @@
 import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { PAIR_PRESETS } from "@/lib/pair-presets";
+import { useDictionary } from "@/components/I18nProvider";
 
 interface PairSelectorProps {
   selected: string[];
@@ -12,6 +13,7 @@ interface PairSelectorProps {
 // Replaces a comma-separated free-text field with clickable chips, so a
 // beginner can't typo a pair symbol into something the exchange rejects.
 export function PairSelector({ selected, onChange }: PairSelectorProps) {
+  const dict = useDictionary();
   function toggle(symbol: string) {
     onChange(selected.includes(symbol) ? selected.filter((s) => s !== symbol) : [...selected, symbol]);
   }
@@ -29,7 +31,7 @@ export function PairSelector({ selected, onChange }: PairSelectorProps) {
               <button
                 type="button"
                 onClick={() => toggle(symbol)}
-                aria-label={`${symbol} verwijderen`}
+                aria-label={dict.pairSelector.removeAriaLabel(symbol)}
                 className="rounded-full p-0.5 transition hover:bg-primary/20"
               >
                 <X className="h-3 w-3" />
@@ -39,7 +41,7 @@ export function PairSelector({ selected, onChange }: PairSelectorProps) {
         </div>
       )}
 
-      <div className="flex flex-wrap gap-1.5" role="group" aria-label="Beschikbare paren">
+      <div className="flex flex-wrap gap-1.5" role="group" aria-label={dict.pairSelector.availableAriaLabel}>
         {PAIR_PRESETS.map(({ symbol, label }) => {
           const checked = selected.includes(symbol);
           return (

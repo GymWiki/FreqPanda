@@ -6,6 +6,7 @@ import type { BotConfigurationDTO } from "@/lib/types";
 import { BudgetSlider } from "@/components/ui/BudgetSlider";
 import { EXCHANGE_PRESETS } from "@/lib/exchange-presets";
 import { apiFetch, toErrorMessage } from "@/lib/api-client";
+import { useDictionary } from "@/components/I18nProvider";
 
 interface GoLiveModalProps {
   bot: BotConfigurationDTO;
@@ -26,6 +27,7 @@ interface BalanceCheck {
 // stake inputs that used to live in NewBotDialog before this app's
 // "try before you risk" pivot moved them here.
 export function GoLiveModal({ bot, onClose, onLive }: GoLiveModalProps) {
+  const dict = useDictionary();
   const [check, setCheck] = useState<BalanceCheck | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [totalBudget, setTotalBudget] = useState(500);
@@ -50,7 +52,7 @@ export function GoLiveModal({ bot, onClose, onLive }: GoLiveModalProps) {
       })
       .catch((err) => {
         if (controller.signal.aborted) return;
-        setLoadError(toErrorMessage(err, "Kon saldo niet ophalen"));
+        setLoadError(toErrorMessage(err, dict.goLive.loadBalanceFailed));
       });
 
     return () => controller.abort();
@@ -67,7 +69,7 @@ export function GoLiveModal({ bot, onClose, onLive }: GoLiveModalProps) {
       });
       onLive(data.bot);
     } catch (err) {
-      setSubmitError(toErrorMessage(err, "Live gaan is mislukt"));
+      setSubmitError(toErrorMessage(err, dict.goLive.goLiveFailed));
     } finally {
       setIsSubmitting(false);
     }
@@ -78,8 +80,8 @@ export function GoLiveModal({ bot, onClose, onLive }: GoLiveModalProps) {
       <div className="card-surface flex max-h-[90vh] w-full max-w-md flex-col p-6">
         <div className="mb-4 flex shrink-0 items-center justify-between">
           <div>
-            <h2 className="font-semibold">Activeer Live Trading</h2>
-            <p className="text-xs text-slate-400">{bot.botName} — vanaf nu met echt geld.</p>
+            <h2 className="font-semibold">{dict.goLive.heading}</h2>
+            <p className="text-xs text-slate-400">{dict.goLive.subtitle(bot.botName)}</p>
           </div>
           <button type="button" onClick={onClose} className="text-slate-400 hover:text-white">
             <X className="h-4 w-4" />
@@ -102,7 +104,7 @@ export function GoLiveModal({ bot, onClose, onLive }: GoLiveModalProps) {
 
           {check && (
             <div className="rounded-lg bg-background px-3 py-2.5">
-              <span className="text-[11px] text-slate-500">Beschikbare balans op {exchangeLabel}</span>
+              <span className="text-[11px] text-slate-500">{dict.goLive.balanceLabel(exchangeLabel ?? "")}</span>
               <p className="text-xl font-semibold text-primary">
                 ${check.balance.amount.toLocaleString("nl-NL", { maximumFractionDigits: 2 })}
                 <span className="ml-1 text-xs font-normal text-slate-500">{check.balance.asset}</span>
@@ -113,14 +115,14 @@ export function GoLiveModal({ bot, onClose, onLive }: GoLiveModalProps) {
           {check && !check.canGoLive && (
             <p className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-xs text-amber-300">
               <AlertTriangle className="h-4 w-4 shrink-0" />
-              Je saldo op {exchangeLabel} is te laag. Stort minimaal ${check.minRequired} om live te handelen.
+              {dict.goLive.balanceTooLow(exchangeLabel ?? "", check.minRequired)}
             </p>
           )}
 
           {check?.canGoLive && (
             <>
               <div>
-                <span className="mb-1 block text-xs font-medium text-slate-400">Totaal Bot Budget (USDT)</span>
+                <span className="mb-1 block text-xs font-medium text-slate-400">{dict.goLive.totalBudgetLabel}</span>
                 <BudgetSlider
                   totalBudget={totalBudget}
                   maxStakePercentage={maxStakePercentage}
@@ -129,7 +131,7 @@ export function GoLiveModal({ bot, onClose, onLive }: GoLiveModalProps) {
                 />
                 {totalBudget > check.balance.amount && (
                   <p className="mt-1.5 text-[11px] text-amber-400">
-                    Budget kan niet hoger zijn dan je beschikbare saldo (${check.balance.amount.toFixed(2)}).
+                    {dict.goLive.budgetTooHigh(check.balance.amount.toFixed(2))}
                   </p>
                 )}
               </div>
@@ -150,7 +152,7 @@ export function GoLiveModal({ bot, onClose, onLive }: GoLiveModalProps) {
           className="mt-4 flex w-full shrink-0 items-center justify-center gap-2 rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-background transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Rocket className="h-4 w-4" />}
-          Activeer Live Trading
+          {dict.goLive.submit}
         </button>
       </div>
     </div>

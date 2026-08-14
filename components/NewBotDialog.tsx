@@ -9,6 +9,7 @@ import { PairSelector } from "@/components/ui/PairSelector";
 import { Switch } from "@/components/ui/Switch";
 import { STRATEGY_PRESETS, type StrategyPreset } from "@/lib/strategy-presets";
 import { apiFetch, toErrorMessage } from "@/lib/api-client";
+import { useDictionary } from "@/components/I18nProvider";
 
 interface NewBotDialogProps {
   onCreated: (bot: BotConfigurationDTO) => void;
@@ -30,6 +31,7 @@ const EMPTY_FORM = {
 // "Koppel exchange account" step (see ConnectExchangeDialog) — required
 // only once the user actually wants to go live.
 export function NewBotDialog({ onCreated }: NewBotDialogProps) {
+  const dict = useDictionary();
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(EMPTY_FORM);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -43,7 +45,7 @@ export function NewBotDialog({ onCreated }: NewBotDialogProps) {
     setError(null);
 
     if (!form.autoSelectCoins && form.pairs.length === 0) {
-      setError("Kies minstens 1 handelspaar, of zet automatische coin-selectie aan.");
+      setError(dict.newBot.validationNeedsPairs);
       return;
     }
 
@@ -65,7 +67,7 @@ export function NewBotDialog({ onCreated }: NewBotDialogProps) {
       setForm(EMPTY_FORM);
       setOpen(false);
     } catch (err) {
-      setError(toErrorMessage(err, "Failed to create bot"));
+      setError(toErrorMessage(err, dict.newBot.createFailed));
     } finally {
       setIsSubmitting(false);
     }
@@ -79,7 +81,7 @@ export function NewBotDialog({ onCreated }: NewBotDialogProps) {
         className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-background transition hover:bg-primary-hover"
       >
         <Plus className="h-4 w-4" />
-        New Bot
+        {dict.newBot.trigger}
       </button>
     );
   }
@@ -89,11 +91,8 @@ export function NewBotDialog({ onCreated }: NewBotDialogProps) {
       <div className="card-surface flex max-h-[90vh] w-full max-w-lg flex-col p-6">
         <div className="mb-4 flex shrink-0 items-center justify-between">
           <div>
-            <h2 className="font-semibold">Nieuwe AI-bot instellen</h2>
-            <p className="text-xs text-slate-400">
-              Elke bot handelt met FreqAI en start in Paper Trading — pas als jij dat wilt, schakel je over naar
-              live geld.
-            </p>
+            <h2 className="font-semibold">{dict.newBot.heading}</h2>
+            <p className="text-xs text-slate-400">{dict.newBot.intro}</p>
           </div>
           <button type="button" onClick={() => setOpen(false)} className="text-slate-400 hover:text-white">
             <X className="h-4 w-4" />
@@ -102,29 +101,28 @@ export function NewBotDialog({ onCreated }: NewBotDialogProps) {
 
         <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col">
           <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
-            <Field label="Botnaam">
+            <Field label={dict.newBot.botNameLabel}>
               <input
                 required
                 value={form.botName}
                 onChange={(e) => setForm({ ...form, botName: e.target.value })}
                 className="input"
-                placeholder="Mijn eerste bot"
+                placeholder={dict.newBot.botNamePlaceholder}
               />
             </Field>
 
-            <FieldGroup label="AI-gedrag">
+            <FieldGroup label={dict.newBot.aiBehaviorLabel}>
               <StrategyPicker
                 selectedId={form.strategyId}
                 onSelect={(preset) => setForm({ ...form, strategyId: preset.id })}
               />
             </FieldGroup>
 
-            <FieldGroup label="Handelsparen">
+            <FieldGroup label={dict.newBot.pairsLabel}>
               <div className="space-y-3">
                 <div className="flex items-center justify-between gap-3 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2.5">
                   <span id="auto-select-coins-label" className="text-xs font-medium text-slate-200">
-                    Laat FreqAI automatisch de beste coins kiezen{" "}
-                    <span className="text-primary">(Aanbevolen)</span>
+                    {dict.newBot.autoSelectLabel} <span className="text-primary">{dict.newBot.recommended}</span>
                   </span>
                   <Switch
                     checked={form.autoSelectCoins}
@@ -135,9 +133,7 @@ export function NewBotDialog({ onCreated }: NewBotDialogProps) {
 
                 {form.autoSelectCoins ? (
                   <p className="rounded-lg bg-background px-3 py-2 text-[11px] leading-relaxed text-slate-400">
-                    De bot scant dynamisch de top-liquide markten en laat de AI handelen waar de kansen het
-                    grootst zijn. Welke exchange dat precies is, kies je later — bij het koppelen van je
-                    exchange-account.
+                    {dict.newBot.autoSelectHint}
                   </p>
                 ) : (
                   <PairSelector selected={form.pairs} onChange={(pairs) => setForm({ ...form, pairs })} />
@@ -146,9 +142,9 @@ export function NewBotDialog({ onCreated }: NewBotDialogProps) {
             </FieldGroup>
 
             <p className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-3 py-2.5 text-[11px] leading-relaxed text-emerald-300">
-              Deze bot start automatisch in <strong>Paper Trading</strong> — geen budget nodig, geen echt geld op
-              het spel. Zodra je tevreden bent met de (virtuele) resultaten, activeer je live trading vanaf de
-              bot-kaart.
+              {dict.newBot.practiceModeNoticePrefix}
+              <strong>{dict.newBot.practiceModeNoticeBold}</strong>
+              {dict.newBot.practiceModeNoticeSuffix}
             </p>
 
             {error && (
@@ -164,7 +160,7 @@ export function NewBotDialog({ onCreated }: NewBotDialogProps) {
             className="mt-4 flex w-full shrink-0 items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-background transition hover:bg-primary-hover disabled:opacity-50"
           >
             {isSubmitting && <Loader2 className="h-4 w-4 animate-spin" />}
-            Bot aanmaken (Paper Trading)
+            {dict.newBot.submit}
           </button>
         </form>
       </div>

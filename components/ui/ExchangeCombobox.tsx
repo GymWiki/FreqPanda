@@ -5,6 +5,7 @@ import * as Popover from "@radix-ui/react-popover";
 import { Check, ChevronDown, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { EXCHANGE_PRESETS, type ExchangePreset } from "@/lib/exchange-presets";
+import { useDictionary } from "@/components/I18nProvider";
 
 interface ExchangeComboboxProps {
   value: string;
@@ -37,6 +38,7 @@ function ExchangeLogo({ exchange, className }: { exchange: ExchangePreset; class
 // (input owns aria-expanded/aria-activedescendant, the list is a listbox
 // of role="option" items) so arrow keys/Enter/Escape all work as expected.
 export function ExchangeCombobox({ value, onChange, ...aria }: ExchangeComboboxProps) {
+  const dict = useDictionary();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
@@ -103,7 +105,7 @@ export function ExchangeCombobox({ value, onChange, ...aria }: ExchangeComboboxP
                 <span className="truncate">{selected.label}</span>
               </>
             ) : (
-              <span className="text-slate-500">Kies een exchange</span>
+              <span className="text-slate-500">{dict.exchangeCombobox.placeholder}</span>
             )}
           </span>
           <ChevronDown className="h-4 w-4 shrink-0 text-slate-400" />
@@ -131,14 +133,14 @@ export function ExchangeCombobox({ value, onChange, ...aria }: ExchangeComboboxP
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Zoek een exchange…"
+              placeholder={dict.exchangeCombobox.searchPlaceholder}
               className="w-full bg-transparent text-sm text-slate-200 outline-none placeholder:text-slate-500"
             />
           </div>
 
           <ul id={listboxId} role="listbox" className="max-h-64 overflow-y-auto p-1">
             {filtered.length === 0 && (
-              <li className="px-2.5 py-3 text-center text-xs text-slate-500">Geen exchange gevonden.</li>
+              <li className="px-2.5 py-3 text-center text-xs text-slate-500">{dict.exchangeCombobox.empty}</li>
             )}
             {filtered.map((exchange, i) => {
               const checked = exchange.id === value;

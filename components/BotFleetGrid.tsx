@@ -7,6 +7,7 @@ import { BotCard } from "@/components/BotCard";
 import { NewBotDialog } from "@/components/NewBotDialog";
 import { PanicButton } from "@/components/PanicButton";
 import { apiFetch } from "@/lib/api-client";
+import { useDictionary } from "@/components/I18nProvider";
 
 interface BotFleetGridProps {
   initialBots: BotConfigurationDTO[];
@@ -16,6 +17,7 @@ interface BotFleetGridProps {
 const POLL_INTERVAL_MS = 10_000;
 
 export function BotFleetGrid({ initialBots }: BotFleetGridProps) {
+  const dict = useDictionary();
   const [bots, setBots] = useState<BotConfigurationDTO[]>(initialBots);
 
   const hasActiveTrainingJob = bots.some(
@@ -83,9 +85,7 @@ export function BotFleetGrid({ initialBots }: BotFleetGridProps) {
       {bots.length === 0 ? (
         <div className="card-surface flex flex-col items-center gap-3 px-6 py-16 text-center">
           <Bot className="h-10 w-10 text-slate-600" />
-          <p className="text-sm text-slate-400">
-            No bots yet. Train a strategy in the Desktop App, then add its configuration here.
-          </p>
+          <p className="text-sm text-slate-400">{dict.botFleet.empty}</p>
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">

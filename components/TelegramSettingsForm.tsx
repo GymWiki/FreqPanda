@@ -3,6 +3,7 @@
 import { useState, type FormEvent } from "react";
 import { Check, Loader2, Send, Unlink } from "lucide-react";
 import { apiFetch, toErrorMessage } from "@/lib/api-client";
+import { useDictionary } from "@/components/I18nProvider";
 
 interface TelegramSettingsFormProps {
   initialChatId: string | null;
@@ -15,6 +16,7 @@ interface TelegramSettingsFormProps {
 // separate feature (a public Telegram webhook receiver, a linking-code
 // scheme back to the Supabase user) — not just a UI tweak on this one.
 export function TelegramSettingsForm({ initialChatId }: TelegramSettingsFormProps) {
+  const dict = useDictionary();
   const [chatId, setChatId] = useState(initialChatId ?? "");
   const [savedChatId, setSavedChatId] = useState(initialChatId);
   const [isSaving, setIsSaving] = useState(false);
@@ -36,7 +38,7 @@ export function TelegramSettingsForm({ initialChatId }: TelegramSettingsFormProp
       setJustSaved(true);
       setTimeout(() => setJustSaved(false), 2000);
     } catch (err) {
-      setError(toErrorMessage(err, "Opslaan is mislukt"));
+      setError(toErrorMessage(err, dict.telegram.saveFailed));
     } finally {
       setIsSaving(false);
     }
@@ -54,7 +56,7 @@ export function TelegramSettingsForm({ initialChatId }: TelegramSettingsFormProp
       setSavedChatId(null);
       setChatId("");
     } catch (err) {
-      setError(toErrorMessage(err, "Loskoppelen is mislukt"));
+      setError(toErrorMessage(err, dict.telegram.unlinkFailed));
     } finally {
       setIsUnlinking(false);
     }
@@ -70,42 +72,39 @@ export function TelegramSettingsForm({ initialChatId }: TelegramSettingsFormProp
     <div className="card-surface p-6">
       <div className="mb-4 flex items-center gap-2">
         <Send className="h-4 w-4 text-primary" />
-        <h2 className="font-semibold">Telegram-meldingen</h2>
+        <h2 className="font-semibold">{dict.telegram.heading}</h2>
       </div>
 
       <ol className="mb-4 list-decimal space-y-1.5 pl-4 text-xs text-slate-400">
         <li>
           {botUsername ? (
-            <>
-              Open Telegram en zoek naar <span className="font-mono text-slate-300">@{botUsername}</span>, start het
-              gesprek.
-            </>
+            dict.telegram.stepOneWithUsername(botUsername)
           ) : (
-            "Start een gesprek met onze Telegram-bot (vraag de bot-naam na bij support als je die nog niet hebt)."
+            dict.telegram.stepOneFallback
           )}
         </li>
         <li>
-          Stuur een bericht naar{" "}
+          {dict.telegram.stepTwoPrefix}
           <a
             href="https://t.me/userinfobot"
             target="_blank"
             rel="noreferrer"
             className="text-primary hover:text-primary-hover"
           >
-            @userinfobot
-          </a>{" "}
-          om je numerieke Chat ID op te vragen.
+            {dict.telegram.stepTwoLinkLabel}
+          </a>
+          {dict.telegram.stepTwoSuffix}
         </li>
-        <li>Plak die hieronder — elke bot die je (her)deployt stuurt daar dan automatisch updates naartoe.</li>
+        <li>{dict.telegram.stepThree}</li>
       </ol>
 
       <form onSubmit={handleSubmit} className="flex items-end gap-2">
         <label className="block flex-1">
-          <span className="mb-1 block text-xs font-medium text-slate-400">Telegram Chat ID</span>
+          <span className="mb-1 block text-xs font-medium text-slate-400">{dict.telegram.chatIdLabel}</span>
           <input
             value={chatId}
             onChange={(e) => setChatId(e.target.value)}
-            placeholder="bijv. 123456789"
+            placeholder={dict.telegram.chatIdPlaceholder}
             inputMode="numeric"
             className="input"
           />
@@ -116,7 +115,7 @@ export function TelegramSettingsForm({ initialChatId }: TelegramSettingsFormProp
           className="flex items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-background transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
         >
           {isSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : justSaved ? <Check className="h-4 w-4" /> : null}
-          Opslaan
+          {dict.telegram.save}
         </button>
       </form>
 
@@ -128,7 +127,7 @@ export function TelegramSettingsForm({ initialChatId }: TelegramSettingsFormProp
           className="mt-3 flex items-center gap-1.5 text-[11px] text-slate-500 transition hover:text-red-400 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {isUnlinking ? <Loader2 className="h-3 w-3 animate-spin" /> : <Unlink className="h-3 w-3" />}
-          Telegram loskoppelen
+          {dict.telegram.unlink}
         </button>
       )}
 

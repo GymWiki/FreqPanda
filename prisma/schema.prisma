@@ -33,6 +33,13 @@ model Profile {
   // against a 7-day cutoff before stopping a bot's VPS container.
   lastActiveAt DateTime? @default(now()) @map("last_active_at")
 
+  // Display language for the app UI — "nl" | "en" (see lib/i18n). Purely a
+  // presentation preference: never read by anything that talks to
+  // freqtrade, Hetzner, or an exchange. Changed via PATCH /api/account/locale
+  // (Settings page), applied on the next server render (router.refresh()) —
+  // no redeploy or session change needed.
+  locale String @default("nl")
+
   bots                BotConfiguration[]
   exchangeConnections ExchangeConnection[]
 

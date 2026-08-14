@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { AlertOctagon, Loader2, X } from "lucide-react";
 import { apiFetch, toErrorMessage } from "@/lib/api-client";
+import { useDictionary } from "@/components/I18nProvider";
 
 interface PanicResult {
   botId: string;
@@ -21,6 +22,7 @@ interface PanicButtonProps {
 // action — gated behind a proper confirmation modal rather than a bare
 // confirm(), matching the weight GoLiveModal already gives the way in.
 export function PanicButton({ disabled, onPanicked }: PanicButtonProps) {
+  const dict = useDictionary();
   const [isConfirmOpen, setIsConfirmOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -34,7 +36,7 @@ export function PanicButton({ disabled, onPanicked }: PanicButtonProps) {
       setResults(data.results);
       await onPanicked();
     } catch (err) {
-      setError(toErrorMessage(err, "Noodstop is mislukt"));
+      setError(toErrorMessage(err, dict.panic.failed));
     } finally {
       setIsSubmitting(false);
     }
@@ -56,7 +58,7 @@ export function PanicButton({ disabled, onPanicked }: PanicButtonProps) {
         className="flex items-center gap-2 rounded-lg border border-red-500/50 bg-red-500/10 px-4 py-2 text-sm font-semibold text-red-400 transition hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-40"
       >
         <AlertOctagon className="h-4 w-4" />
-        Noodstop
+        {dict.panic.trigger}
       </button>
 
       {isConfirmOpen && (
@@ -67,15 +69,16 @@ export function PanicButton({ disabled, onPanicked }: PanicButtonProps) {
                 <div className="mb-4 flex items-start justify-between">
                   <div className="flex items-center gap-2 text-red-400">
                     <AlertOctagon className="h-5 w-5" />
-                    <h2 className="font-semibold">Noodstop activeren?</h2>
+                    <h2 className="font-semibold">{dict.panic.confirmHeading}</h2>
                   </div>
                   <button type="button" onClick={handleClose} className="text-slate-400 hover:text-white">
                     <X className="h-4 w-4" />
                   </button>
                 </div>
                 <p className="text-sm text-slate-300">
-                  Dit sluit <strong>direct</strong> alle open posities op al je live bots tegen de huidige
-                  marktprijs en pauzeert ze allemaal. Dit kan niet ongedaan worden gemaakt.
+                  {dict.panic.confirmBodyPrefix}
+                  <strong>{dict.panic.confirmBodyBold}</strong>
+                  {dict.panic.confirmBodySuffix}
                 </p>
                 {error && (
                   <p
@@ -92,7 +95,7 @@ export function PanicButton({ disabled, onPanicked }: PanicButtonProps) {
                     disabled={isSubmitting}
                     className="flex-1 rounded-lg border border-border px-4 py-2 text-sm font-medium text-slate-300 transition hover:border-primary disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    Annuleren
+                    {dict.panic.confirmCancel}
                   </button>
                   <button
                     type="button"
@@ -101,27 +104,27 @@ export function PanicButton({ disabled, onPanicked }: PanicButtonProps) {
                     className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-red-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-red-400 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {isSubmitting && <Loader2 className="h-4 w-4 animate-spin" />}
-                    Ja, stop alles
+                    {dict.panic.confirmProceed}
                   </button>
                 </div>
               </>
             ) : (
               <>
                 <div className="mb-4 flex items-center justify-between">
-                  <h2 className="font-semibold">Noodstop uitgevoerd</h2>
+                  <h2 className="font-semibold">{dict.panic.resultHeading}</h2>
                   <button type="button" onClick={handleClose} className="text-slate-400 hover:text-white">
                     <X className="h-4 w-4" />
                   </button>
                 </div>
                 {results.length === 0 ? (
-                  <p className="text-sm text-slate-400">Geen actieve bots om te stoppen.</p>
+                  <p className="text-sm text-slate-400">{dict.panic.resultEmpty}</p>
                 ) : (
                   <ul className="space-y-2 text-sm">
                     {results.map((r) => (
                       <li key={r.botId} className="flex items-start justify-between gap-3">
                         <span className="text-slate-200">{r.botName}</span>
                         <span className={r.ok ? "text-right text-emerald-400" : "text-right text-amber-400"}>
-                          {r.ok ? "Gestopt" : "Gestopt — controleer handmatig"}
+                          {r.ok ? dict.panic.resultStopped : dict.panic.resultPartial}
                         </span>
                       </li>
                     ))}
@@ -132,7 +135,7 @@ export function PanicButton({ disabled, onPanicked }: PanicButtonProps) {
                   onClick={handleClose}
                   className="mt-5 w-full rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-background transition hover:bg-primary-hover"
                 >
-                  Sluiten
+                  {dict.common.close}
                 </button>
               </>
             )}
