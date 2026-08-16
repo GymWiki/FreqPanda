@@ -60,6 +60,31 @@ jobs:
             echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
           fi
 
+      # Temporary diagnostic: the previous run still logged "Signature not
+      # found for the updater JSON. Skipping upload..." even after the
+      # signing secrets were added to the repo, which should be impossible
+      # if they're actually reaching this job. Prints presence + length
+      # only (GitHub also auto-masks the value in any output regardless) —
+      # never the secret itself — to tell apart "secret not wired to this
+      # workflow" from "secret wired but tauri-cli isn't picking it up".
+      # Remove once the real cause is confirmed.
+      - name: Debug signing secret presence
+        shell: bash
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::warning::TAURI_SIGNING_PRIVATE_KEY is EMPTY/unset in this job"
+          else
+            echo "TAURI_SIGNING_PRIVATE_KEY is set, length=${#TAURI_SIGNING_PRIVATE_KEY}"
+          fi
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]; then
+            echo "::warning::TAURI_SIGNING_PRIVATE_KEY_PASSWORD is EMPTY/unset in this job"
+          else
+            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD is set, length=${#TAURI_SIGNING_PRIVATE_KEY_PASSWORD}"
+          fi
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
       - name: Build and publish release
         uses: tauri-apps/tauri-action@v0
         env:
