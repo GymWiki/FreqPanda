@@ -1,0 +1,10 @@
+# App-own command permission (unprefixed identifier, see capabilities/default.json)
+# — Tauri v2 gates every invoke() call, including the app's own
+# #[tauri::command] functions, not just plugin commands. Without this,
+# train_local_model (src-tauri/src/main.rs) is registered in
+# invoke_handler! but unreachable from the frontend: "Command
+# train_local_model not allowed by ACL".
+[[permission]]
+identifier = "allow-train-local-model"
+description = "Enables the train_local_model command without any pre-configured scope."
+commands.allow = ["train_local_model"]

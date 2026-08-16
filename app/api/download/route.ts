@@ -3,7 +3,7 @@ import { withErrorHandling } from "@/lib/api-handler";
 
 export const dynamic = "force-dynamic";
 
-const REPO = "GymWiki/Trading-platform";
+const REPO = "GymWiki/FreqPanda";
 // Deliberately NOT /releases/latest — that path itself 404s on GitHub
 // whenever the repo has zero *published* releases (which is exactly the
 // case whenever we fall back here: nothing published yet, or the lookup
