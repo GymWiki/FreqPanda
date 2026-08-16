@@ -32,5 +32,13 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEYyQjA1N0U2RTU1MUE3NTQKUldSVXAxSGw1bGV3OGc5dVFqbkdDRndWaTdaQi9nTTBNUVNUYk5yRmpodVpjSW51cDY4TWkrd2EK",
+      "endpoints": [
+        "https://github.com/GymWiki/Trading-platform/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

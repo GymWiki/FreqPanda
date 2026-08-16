@@ -64,6 +64,14 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Present => tauri-action signs the bundle and also generates +
+          # uploads latest.json (the manifest src-tauri/tauri.conf.json's
+          # plugins.updater.endpoints points at) as a release asset.
+          # Absent => it silently skips both, which is exactly what the
+          # first two builds did ("Signature not found for the updater
+          # JSON. Skipping upload...") before these secrets existed.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ steps.release_tag.outputs.tag }}
           releaseName: "FreqPanda Desktop ${{ steps.release_tag.outputs.tag }}"

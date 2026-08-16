@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use tauri_plugin_updater::UpdaterExt;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
@@ -303,9 +305,71 @@ fn collect_joblib_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String
     Ok(())
 }
 
+// Runs once per launch, a few seconds after startup so the update check
+// never competes with the window's own first paint. Only ever asks — never
+// installs silently — an unattended restart mid-session would drop
+// whatever the user was doing in the dashboard, and this app has no
+// state of its own to preserve across that, just an open webview. The
+// artifact itself is minisign-signed and verified by the updater plugin
+// before install (see tauri.conf.json's plugins.updater.pubkey and the
+// matching TAURI_SIGNING_PRIVATE_KEY secret in
+// .github/workflows/release-desktop-app.yml) against whatever this repo's
+// latest *published* GitHub Release currently is — draft releases (the
+// default for every CI build, see that workflow) are invisible to it until
+// a human publishes one.
+async fn check_for_update(app: AppHandle) {
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    let update = match app.updater() {
+        Ok(updater) => match updater.check().await {
+            Ok(Some(update)) => update,
+            Ok(None) => return,
+            Err(e) => {
+                eprintln!("[updater] check failed: {e}");
+                return;
+            }
+        },
+        Err(e) => {
+            eprintln!("[updater] not available: {e}");
+            return;
+        }
+    };
+
+    let version = update.version.clone();
+    let app_for_install = app.clone();
+    app.dialog()
+        .message(format!(
+            "Er is een nieuwe versie beschikbaar ({version}). Nu downloaden en installeren? De app herstart daarna automatisch."
+        ))
+        .title("Update beschikbaar")
+        .buttons(MessageDialogButtons::YesNo)
+        .kind(MessageDialogKind::Info)
+        .show(move |confirmed| {
+            if !confirmed {
+                return;
+            }
+            let app_for_install = app_for_install.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = update.download_and_install(|_, _| {}, || {}).await {
+                    eprintln!("[updater] download/install failed: {e}");
+                    return;
+                }
+                // request_restart() is a plain AppHandle method (tauri
+                // core) — no separate process-plugin needed just for this.
+                app_for_install.request_restart();
+            });
+        });
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .setup(|app| {
+            tauri::async_runtime::spawn(check_for_update(app.handle().clone()));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![train_local_model])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

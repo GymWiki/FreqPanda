@@ -12,6 +12,8 @@
     {
       "identifier": "fs:scope",
       "allow": [{ "path": "$APPLOCALDATA/**" }]
-    }
+    },
+    "updater:default",
+    "dialog:default"
   ]
 }
