@@ -4,7 +4,12 @@ import { withErrorHandling } from "@/lib/api-handler";
 export const dynamic = "force-dynamic";
 
 const REPO = "GymWiki/Trading-platform";
-const RELEASES_PAGE = `https://github.com/${REPO}/releases/latest`;
+// Deliberately NOT /releases/latest — that path itself 404s on GitHub
+// whenever the repo has zero *published* releases (which is exactly the
+// case whenever we fall back here: nothing published yet, or the lookup
+// failed). /releases (no suffix) always resolves, published releases or
+// not.
+const RELEASES_PAGE = `https://github.com/${REPO}/releases`;
 
 // One asset-name check per platform, deliberately excluding the .sig
 // files release-desktop-app.yml uploads alongside every installer (see
