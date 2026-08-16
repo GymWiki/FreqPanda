@@ -60,41 +60,18 @@ jobs:
             echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
           fi
 
-      # Temporary diagnostic: the previous run still logged "Signature not
-      # found for the updater JSON. Skipping upload..." even after the
-      # signing secrets were added to the repo, which should be impossible
-      # if they're actually reaching this job. Prints presence + length
-      # only (GitHub also auto-masks the value in any output regardless) —
-      # never the secret itself — to tell apart "secret not wired to this
-      # workflow" from "secret wired but tauri-cli isn't picking it up".
-      # Remove once the real cause is confirmed.
-      - name: Debug signing secret presence
-        shell: bash
-        run: |
-          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
-            echo "::warning::TAURI_SIGNING_PRIVATE_KEY is EMPTY/unset in this job"
-          else
-            echo "TAURI_SIGNING_PRIVATE_KEY is set, length=${#TAURI_SIGNING_PRIVATE_KEY}"
-          fi
-          if [ -z "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]; then
-            echo "::warning::TAURI_SIGNING_PRIVATE_KEY_PASSWORD is EMPTY/unset in this job"
-          else
-            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD is set, length=${#TAURI_SIGNING_PRIVATE_KEY_PASSWORD}"
-          fi
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-
       - name: Build and publish release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Present => tauri-action signs the bundle and also generates +
-          # uploads latest.json (the manifest src-tauri/tauri.conf.json's
-          # plugins.updater.endpoints points at) as a release asset.
-          # Absent => it silently skips both, which is exactly what the
-          # first two builds did ("Signature not found for the updater
-          # JSON. Skipping upload...") before these secrets existed.
+          # Confirmed present and correctly-sized in this job (a prior
+          # temporary diagnostic step printed length=348/32, matching the
+          # generated key/password exactly) — so signing was never blocked
+          # by the secrets themselves. The actual cause of "Signature not
+          # found for the updater JSON. Skipping upload..." on both earlier
+          # runs was src-tauri/tauri.conf.json's bundle.createUpdaterArtifacts
+          # defaulting to false: without it, Tauri's bundler never produces
+          # the signed updater artifact regardless of these keys being set.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
