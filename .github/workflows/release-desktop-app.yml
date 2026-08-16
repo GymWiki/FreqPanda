@@ -6,12 +6,20 @@ name: Build & release desktop app
 # compiles the Rust/Tauri binary, never the Next.js app itself.
 #
 # Triggered by pushing a tag like `app-v0.1.0` (kept distinct from any web
-# release tags), or manually via workflow_dispatch for a one-off rebuild.
+# release tags), or manually via workflow_dispatch for a one-off rebuild —
+# e.g. when the git credential driving a given push is scoped to a single
+# branch and can't push a new tag ref itself, dispatching this workflow
+# directly against that branch achieves the same build without one.
 on:
   push:
     tags:
       - "app-v*"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag to publish the build under (e.g. app-v0.1.0)"
+        required: true
+        default: "app-v0.1.0"
 
 permissions:
   contents: write
@@ -42,13 +50,23 @@ jobs:
       - name: Install root npm dependencies
         run: npm ci
 
+      - name: Resolve release tag
+        id: release_tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build and publish release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "FreqPanda Desktop ${{ github.ref_name }}"
+          tagName: ${{ steps.release_tag.outputs.tag }}
+          releaseName: "FreqPanda Desktop ${{ steps.release_tag.outputs.tag }}"
           releaseBody: |
             Automated build from ${{ github.sha }}. Unsigned installers —
             Windows SmartScreen and macOS Gatekeeper will warn on first run
