@@ -43,8 +43,7 @@ export async function deployBotToVps({ bot, supabase }: DeployBotParams) {
   const appUrl = process.env.NEXT_PUBLIC_APP_URL;
   if (!appUrl) throw new Error("NEXT_PUBLIC_APP_URL is not configured");
 
-  // Training and paper trading only ever need public market data (see
-  // lib/hetzner.ts buildFreqAITrainingArtifacts's own doc comment) — this
+  // Training and paper trading only ever need public market data — this
   // bot's own ExchangeConnection (see prisma/schema.prisma) is genuinely
   // optional here. Only a live deploy requires one, and requires it to be
   // verified, not just present: an unverified row could hold a typo'd or
@@ -111,10 +110,8 @@ export async function deployBotToVps({ bot, supabase }: DeployBotParams) {
   const cloudInit = buildFreqtradeCloudInit({
     botName: bot.botName.toLowerCase().replace(/[^a-z0-9-]/g, "-"),
     exchangeName: bot.exchangeName,
-    // Blank for paper trading — dry-run only ever needs public market data
-    // (see lib/hetzner.ts buildFreqAITrainingArtifacts's doc comment for
-    // the training-side version of the same rule), so there's nothing to
-    // decrypt when liveConnection is null.
+    // Blank for paper trading — dry-run only ever needs public market
+    // data, so there's nothing to decrypt when liveConnection is null.
     exchangeApiKey: liveConnection ? decrypt(liveConnection.apiKey) : "",
     exchangeApiSecret: liveConnection ? decrypt(liveConnection.apiSecret) : "",
     strategy: bot.strategy,
@@ -137,11 +134,11 @@ export async function deployBotToVps({ bot, supabase }: DeployBotParams) {
     telegramChatId: profile?.telegramChatId ?? undefined,
   });
 
-  // Redeploy (retrain completed for an already-live bot): tear down the old
-  // VM first so we never end up paying for two servers for one bot. Best
-  // effort — if this fails, the old box is an orphan the reaper doesn't
-  // currently cover (it only watches TrainingJob-linked servers), which is
-  // an acceptable gap for the rare case of a mid-redeploy Hetzner failure.
+  // Redeploy (e.g. resuming from a pause): tear down the old VM first so
+  // we never end up paying for two servers for one bot. Best effort — if
+  // this fails, the old box is an orphan nothing currently cleans up,
+  // which is an acceptable gap for the rare case of a mid-redeploy
+  // Hetzner failure.
   if (bot.hetznerServerId) {
     try {
       await deleteHetznerServer(bot.hetznerServerId);

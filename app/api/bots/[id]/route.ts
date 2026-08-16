@@ -9,7 +9,6 @@ import { withErrorHandling, parseJsonBody } from "@/lib/api-handler";
 export const dynamic = "force-dynamic";
 
 const patchBodySchema = z.object({
-  trainingMode: z.enum(["LOCAL", "CLOUD"]).optional(),
   // Auto-Compounding: only flips the DB flag here — it's read fresh into
   // config.json on the *next* (re)deploy (see lib/deploy-bot.ts,
   // lib/hetzner.ts), not applied to a currently-running instance, the same
@@ -37,14 +36,14 @@ export const PATCH = withErrorHandling(async (req: NextRequest, { params }: { pa
   // flipping it would bypass that gate entirely.
   const parsed = await parseJsonBody(req, patchBodySchema);
   if ("error" in parsed) return parsed.error;
-  const { trainingMode, autoCompound } = parsed.data;
-  if (trainingMode === undefined && autoCompound === undefined) {
-    return NextResponse.json({ error: "Nothing to update — provide trainingMode and/or autoCompound" }, { status: 400 });
+  const { autoCompound } = parsed.data;
+  if (autoCompound === undefined) {
+    return NextResponse.json({ error: "Nothing to update — provide autoCompound" }, { status: 400 });
   }
 
   const updated = await prisma.botConfiguration.update({
     where: { id: bot.id },
-    data: { trainingMode, autoCompound },
+    data: { autoCompound },
     select: botSelect,
   });
 

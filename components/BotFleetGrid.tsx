@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Bot } from "lucide-react";
 import type { BotConfigurationDTO } from "@/lib/types";
 import { BotCard } from "@/components/BotCard";
@@ -15,42 +15,13 @@ interface BotFleetGridProps {
   vpsBotQuota: number;
 }
 
-const POLL_INTERVAL_MS = 10_000;
-
 export function BotFleetGrid({ initialBots }: BotFleetGridProps) {
   const dict = useDictionary();
   const [bots, setBots] = useState<BotConfigurationDTO[]>(initialBots);
 
-  const hasActiveTrainingJob = bots.some(
-    (b) => b.latestTrainingJob?.status === "QUEUED" || b.latestTrainingJob?.status === "TRAINING",
-  );
   const hasStoppableBots = bots.some(
     (b) => b.deploymentStatus === "VPS_ACTIVE" && b.status !== "PAUSED_EMERGENCY" && b.status !== "SLEEPING",
   );
-
-  // Cloud training reports back asynchronously via a webhook the browser
-  // never sees directly, so poll the bot list while any job is in flight.
-  useEffect(() => {
-    if (!hasActiveTrainingJob) return;
-
-    let cancelled = false;
-    const interval = setInterval(async () => {
-      try {
-        const data = await apiFetch<{ bots: BotConfigurationDTO[] }>("/api/bots");
-        if (!cancelled) setBots(data.bots);
-      } catch (err) {
-        // A single missed poll isn't worth surfacing to the user — the
-        // next tick retries automatically, and BotCard's own actions
-        // already report errors for anything the user directly triggered.
-        console.error("[BotFleetGrid] Poll for /api/bots failed:", err);
-      }
-    }, POLL_INTERVAL_MS);
-
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  }, [hasActiveTrainingJob]);
 
   // The panic route itself only returns per-bot ok/error flags, not full
   // DTOs (see app/api/bots/panic) — refetching is simpler than hand-rolling

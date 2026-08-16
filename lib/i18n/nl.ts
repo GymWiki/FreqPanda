@@ -33,29 +33,14 @@ export const nl = {
     local: "Alleen lokaal",
     liveOnVps: "Actief in de cloud",
     inactive: "Niet actief",
-    trainingQueued: "In de wachtrij",
-    training: "Wordt getraind…",
-    trainingComplete: "Klaar",
-    trainingFailed: "Mislukt",
-    trainingCancelled: "Gestopt",
-  },
-
-  trainingToggle: {
-    cloud: "AI trainen in de cloud",
-    local: "AI trainen op mijn eigen pc",
-    tooltip:
-      "In de cloud: wij trainen het AI-model op onze eigen servers, jij hoeft niets aan te laten staan. Op je eigen pc: het model wordt lokaal getraind via de desktop-app en daarna geüpload.",
   },
 
   botCard: {
     resumeFailed: "Hervatten is mislukt",
     stopFailed: "Stoppen is mislukt",
-    trainingModeUpdateFailed: "Wijzigen is mislukt",
     autoCompoundUpdateFailed: "Kon 'winst herinvesteren' niet wijzigen",
     uploadFailed: "Uploaden is mislukt",
     localTrainingFailed: "Trainen op je pc is mislukt",
-    cloudTrainingFailed: "AI trainen in de cloud is mislukt",
-    stopTrainingFailed: "Stoppen van het trainen is mislukt",
     deployFailed: "Starten is mislukt",
     loadCredentialsFailed: "Kon inloggegevens niet ophalen",
     removeFailed: "Verwijderen is mislukt",
@@ -63,7 +48,6 @@ export const nl = {
 
     confirmStop: (botName: string) =>
       `${botName} stoppen? Er worden geen nieuwe posities meer geopend — bestaande open posities blijven gewoon lopen. Je kan de bot daarna weer hervatten.`,
-    confirmStopTraining: "Weet je zeker dat je het trainen wilt stoppen? De server in de cloud wordt direct verwijderd.",
     confirmRemove: (botName: string) => `${botName} verwijderen? Dit kan niet ongedaan gemaakt worden.`,
     confirmDisconnectExchange: "Account loskoppelen van deze bot?",
 
@@ -93,15 +77,9 @@ export const nl = {
     realMoney: "Echt geld",
     goLive: "Overstappen op echt geld",
 
-    cloudTrainingStarted: (botName: string) => `AI trainen gestart voor ${botName} — dit kan een tijdje duren.`,
-    trainingInCloud: "Wordt getraind in de cloud…",
-    startCloudTraining: "AI trainen in de cloud",
-    stoppingTraining: "Wordt gestopt…",
-    stopTraining: "Stoppen met trainen",
     trainingLocally: "Wordt getraind op je pc…",
     startLocalTraining: "AI trainen op mijn pc",
-    localTrainingNeedsApp:
-      "Trainen op je eigen pc vereist de desktop-app — download 'm op de website, of kies AI trainen in de cloud.",
+    localTrainingNeedsApp: "Trainen vereist de desktop-app — download 'm op de website.",
     modelUploaded: "Model geüpload — vervang handmatig indien nodig",
     orUploadManually: "Of upload zelf een modelbestand (.joblib)",
 

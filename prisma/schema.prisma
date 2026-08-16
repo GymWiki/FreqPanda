@@ -68,60 +68,7 @@ enum DeploymentStatus {
   @@map("deployment_status")
 }
 
-// How the user currently wants to train this bot's FreqAI model. Purely a
-// UI preference — the actual run history lives in TrainingJob.
-enum TrainingMode {
-  LOCAL
-  CLOUD
-
-  @@map("training_mode")
-}
-
-enum TrainingStatus {
-  QUEUED
-  TRAINING
-  COMPLETED
-  FAILED
-  // User-initiated cancel (POST /api/train/cloud/stop) — distinct from
-  // FAILED: nothing went wrong, the user asked for this. Treated as
-  // terminal everywhere FAILED is (idempotent guards, the reap cron's
-  // cleanup sweep, TrainingProgressBar's polling stop).
-  CANCELLED
-
-  @@map("training_status")
-}
-
-// Coarse phase within a single cloud training run — reported by the
-// training VM's own script at each real checkpoint (see lib/hetzner.ts
-// buildFreqAITrainingArtifacts's report_stage calls) via
-// POST /api/train/cloud/progress. This is a genuine signal, not a guess:
-// freqtrade's `backtesting` command (how FreqAI training actually runs)
-// has no fine-grained progress API to poll, so GET /api/train/cloud/status
-// combines these real stage transitions with a time-based estimate,
-// interpolated using this bot's own historical run durations, to produce
-// a smooth percentage — see that route for the exact math.
-enum TrainingStage {
-  QUEUED
-  // Reported from cloud-init's `bootcmd` — the earliest possible point in
-  // the VM's life, before package_update/packages installs docker.io/curl/
-  // jq and before write_files/runcmd ever run. Exists specifically to
-  // distinguish "the VM never booted / cloud-init never started" from
-  // "it booted fine but got stuck installing packages or pulling the
-  // image" — investigated after a job sat at QUEUED (i.e. before even
-  // PULLING_IMAGE) for the entire duration of two separate incidents with
-  // no way to tell which of those it was.
-  BOOTED
-  PULLING_IMAGE
-  DOWNLOADING_DATA
-  TRAINING
-  UPLOADING
-  DONE
-
-  @@map("training_stage")
-}
-
-// Operational lifecycle of the bot itself — distinct from TrainingStatus,
-// which tracks a single training run. TRAINING/UPDATING_MODEL are the
+// Operational lifecycle of the bot itself. TRAINING/UPDATING_MODEL are the
 // statuses that must never overlap with trading (paper or live): see
 // lib/bot-status.ts (canTrade/assertCanTrade), which every code path that
 // could start or resume trading is required to check.
@@ -308,49 +255,12 @@ model BotConfiguration {
   // sha256 of the one-time bearer token given to the *deployed* freqtrade
   // instance (via user_data/webhook.json), letting it call back into
   // POST /api/bots/[id]/status without a user session. Rotated on every
-  // (re)deploy. Distinct from TrainingJob.callbackTokenHash, which
-  // authenticates the ephemeral *training* VM instead.
+  // (re)deploy.
   statusWebhookTokenHash String? @unique @map("status_webhook_token_hash")
-
-  trainingMode TrainingMode    @default(LOCAL) @map("training_mode")
-  trainingJobs TrainingJob[]
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
   @@index([userId])
   @@map("bot_configurations")
-}
-
-// One row per training attempt (local upload or cloud run), so status/errors
-// for an in-progress or past run can be surfaced in the dashboard.
-model TrainingJob {
-  id     String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  botId  String           @map("bot_id") @db.Uuid
-  bot    BotConfiguration @relation(fields: [botId], references: [id], onDelete: Cascade)
-  userId String           @map("user_id") @db.Uuid
-
-  mode   TrainingMode
-  status TrainingStatus @default(QUEUED)
-
-  // Real checkpoint the VM last reported reaching, plus when — see
-  // TrainingStage doc comment. stageUpdatedAt anchors the time-based
-  // interpolation within the current stage in GET /api/train/cloud/status.
-  stage          TrainingStage @default(QUEUED) @map("stage")
-  stageUpdatedAt DateTime      @default(now()) @map("stage_updated_at")
-
-  // sha256 of the one-time bearer token handed to the ephemeral training VM
-  // so it can report status back without holding a real user session.
-  callbackTokenHash String @unique @map("callback_token_hash")
-
-  hetznerServerId String? @map("hetzner_server_id")
-  errorMessage    String? @map("error_message")
-  aiModelPath     String? @map("ai_model_path")
-
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
-
-  @@index([botId])
-  @@index([status])
-  @@map("training_jobs")
 }

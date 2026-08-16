@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import {
   Download,
   Rocket,
@@ -8,7 +8,6 @@ import {
   Loader2,
   CheckCircle2,
   Trash2,
-  Cloud,
   Laptop,
   KeyRound,
   Copy,
@@ -22,15 +21,12 @@ import {
   ShieldCheck,
   ShieldAlert,
   Unlink,
-  XCircle,
 } from "lucide-react";
-import type { BotConfigurationDTO, ExchangeConnectionDTO, TrainingStatus } from "@/lib/types";
-import { StatusBadge, TrainingStatusBadge } from "@/components/ui/StatusBadge";
-import { TrainingModeToggle } from "@/components/ui/Toggle";
+import type { BotConfigurationDTO, ExchangeConnectionDTO } from "@/lib/types";
+import { StatusBadge } from "@/components/ui/StatusBadge";
 import { GoLiveModal } from "@/components/GoLiveModal";
 import { ConnectExchangeDialog } from "@/components/ConnectExchangeDialog";
 import { TradeHistoryFeed } from "@/components/TradeHistoryFeed";
-import { TrainingProgressBar } from "@/components/TrainingProgressBar";
 import { Switch } from "@/components/ui/Switch";
 import { EXCHANGE_PRESETS } from "@/lib/exchange-presets";
 import { DEFAULT_PAPER_TOTAL_BUDGET, DEFAULT_PAPER_MAX_STAKE_PERCENTAGE } from "@/lib/paper-trading-defaults";
@@ -51,59 +47,42 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
   const [isUploading, setIsUploading] = useState(false);
   const [isDeploying, setIsDeploying] = useState(false);
   const [isTrainingLocally, setIsTrainingLocally] = useState(false);
-  const [isStartingCloudTraining, setIsStartingCloudTraining] = useState(false);
-  const [isStoppingTraining, setIsStoppingTraining] = useState(false);
   const [isRevealingCredentials, setIsRevealingCredentials] = useState(false);
   const [apiCredentials, setApiCredentials] = useState<{ username: string; password: string } | null>(null);
   const [copiedField, setCopiedField] = useState<"username" | "password" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isGoLiveOpen, setIsGoLiveOpen] = useState(false);
-  const [isTogglingTrainingMode, setIsTogglingTrainingMode] = useState(false);
   const [isTogglingAutoCompound, setIsTogglingAutoCompound] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isResuming, setIsResuming] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
   const [isConnectExchangeOpen, setIsConnectExchangeOpen] = useState(false);
   const [isDisconnectingExchange, setIsDisconnectingExchange] = useState(false);
-  // Only set once the start-cloud-training call actually succeeds (not on
-  // the click itself) — see handleStartCloudTraining. Auto-dismisses after
-  // a few seconds; the persistent, ongoing signal is TrainingProgressBar
-  // below, this is just the one-shot "yep, it started" confirmation.
-  const [justStartedCloudTraining, setJustStartedCloudTraining] = useState(false);
-  const justStartedCloudTrainingTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Optimistic overrides for the two network-backed toggles below: bot.X
-  // only changes once the parent re-renders with a fresh prop after
-  // onUpdate, which used to leave the switch visually frozen in its old
-  // position for the whole PATCH round-trip. Set on click, cleared once
-  // that PATCH settles (success or failure) — cleared, not left set, so a
-  // failed request correctly snaps back to the real bot.X value rather
+  // Optimistic override for the autoCompound toggle: bot.autoCompound only
+  // changes once the parent re-renders with a fresh prop after onUpdate,
+  // which used to leave the switch visually frozen in its old position for
+  // the whole PATCH round-trip. Set on click, cleared once that PATCH
+  // settles (success or failure) — cleared, not left set, so a failed
+  // request correctly snaps back to the real bot.autoCompound value rather
   // than getting stuck showing a change that was never actually saved.
-  const [optimisticTrainingMode, setOptimisticTrainingMode] = useState<"LOCAL" | "CLOUD" | null>(null);
   const [optimisticAutoCompound, setOptimisticAutoCompound] = useState<boolean | null>(null);
   // React's `disabled` prop on the toggle only takes effect on the render
-  // *after* the state update that sets isToggling*, so a fast double-click
-  // (or a click event firing twice for any other reason) can still reach
-  // this handler a second time before that re-render commits. A ref is
-  // read/written synchronously, immune to that timing gap, so it's the
-  // actual guard against a double-fire — isToggling* alone (disabling the
-  // button) is a courtesy for slow networks, not a correctness guarantee.
-  const trainingModeInFlight = useRef(false);
+  // *after* the state update that sets isTogglingAutoCompound, so a fast
+  // double-click (or a click event firing twice for any other reason) can
+  // still reach this handler a second time before that re-render commits.
+  // A ref is read/written synchronously, immune to that timing gap, so
+  // it's the actual guard against a double-fire — isTogglingAutoCompound
+  // alone (disabling the button) is a courtesy for slow networks, not a
+  // correctness guarantee.
   const autoCompoundInFlight = useRef(false);
 
-  const jobActive = bot.latestTrainingJob?.status === "QUEUED" || bot.latestTrainingJob?.status === "TRAINING";
   const canGoLive = bot.status === "TRAINING_PAPER_TRADE" && bot.deploymentStatus === "VPS_ACTIVE";
   const isPaused = bot.status === "PAUSED_EMERGENCY" || bot.status === "SLEEPING" || bot.status === "PAUSED_MANUAL";
   // Only this bot's own, currently-running trading loop can be stopped —
   // matches exactly what POST /api/bots/[id]/stop itself requires.
   const canStop =
     bot.deploymentStatus === "VPS_ACTIVE" && (bot.status === "TRAINING_PAPER_TRADE" || bot.status === "LIVE_TRADING");
-
-  useEffect(() => {
-    return () => {
-      if (justStartedCloudTrainingTimeout.current) clearTimeout(justStartedCloudTrainingTimeout.current);
-    };
-  }, []);
 
   // Clears PAUSED_EMERGENCY (Panic Button), SLEEPING (Sleep Mode), or
   // PAUSED_MANUAL (Stop bot, below) — the only place any of the three is
@@ -140,28 +119,6 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
       setError(toErrorMessage(err, dict.botCard.stopFailed));
     } finally {
       setIsStopping(false);
-    }
-  }
-
-  async function handleTrainingModeChange(trainingMode: "LOCAL" | "CLOUD") {
-    if (trainingModeInFlight.current) return;
-    trainingModeInFlight.current = true;
-    setError(null);
-    setIsTogglingTrainingMode(true);
-    setOptimisticTrainingMode(trainingMode);
-    try {
-      const data = await apiFetch<{ bot: BotConfigurationDTO }>(`/api/bots/${bot.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ trainingMode }),
-      });
-      onUpdate(data.bot);
-    } catch (err) {
-      setError(toErrorMessage(err, dict.botCard.trainingModeUpdateFailed));
-    } finally {
-      setOptimisticTrainingMode(null);
-      setIsTogglingTrainingMode(false);
-      trainingModeInFlight.current = false;
     }
   }
 
@@ -207,12 +164,13 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
     }
   }
 
-  // Mode A (local): Rust spawns the FreqAI child process and hands back the
-  // path of the one resulting .joblib file. Everything after that reuses
-  // the exact same upload flow as a manual file pick — no separate
-  // auth/upload path in Rust, since this JS runs inside the same
-  // authenticated dashboard session whether it's a browser tab or the
-  // Tauri webview.
+  // Training only ever happens locally, via the desktop app — bots deploy
+  // to a VPS to trade, never to train there. Rust spawns the FreqAI child
+  // process and hands back the path of the one resulting .joblib file.
+  // Everything after that reuses the exact same upload flow as a manual
+  // file pick — no separate auth/upload path in Rust, since this JS runs
+  // inside the same authenticated dashboard session whether it's a browser
+  // tab or the Tauri webview.
   async function handleStartLocalTraining() {
     setError(null);
     setIsTrainingLocally(true);
@@ -241,76 +199,6 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
       setError(toErrorMessage(err, dict.botCard.localTrainingFailed));
     } finally {
       setIsTrainingLocally(false);
-    }
-  }
-
-  // Mode B (cloud): fire-and-forget — the VM reports back on its own via
-  // /api/train/cloud/callback. BotFleetGrid polls while a job is active and
-  // will push the updated status into this card's props. Historical market
-  // data is no longer fetched client-side at all — for an auto-select bot,
-  // the VM rsyncs it directly from the permanent data server over SSH (see
-  // rsyncDataScript / buildDataServerCloudInit in lib/hetzner.ts) — so this
-  // click is simple again: just start the job.
-  async function handleStartCloudTraining() {
-    setError(null);
-    setIsStartingCloudTraining(true);
-    try {
-      const data = await apiFetch<{ job: { id: string; status: TrainingStatus; createdAt: string } }>(
-        "/api/train/cloud",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ botId: bot.id }),
-        },
-      );
-      onUpdate({
-        ...bot,
-        trainingMode: "CLOUD",
-        latestTrainingJob: {
-          id: data.job.id,
-          status: data.job.status,
-          mode: "CLOUD",
-          errorMessage: null,
-          createdAt: data.job.createdAt,
-        },
-      });
-      // Only reachable once the call above actually succeeded — a click
-      // that fails (network error, busy bot, etc.) hits the catch below
-      // and never shows this.
-      setJustStartedCloudTraining(true);
-      if (justStartedCloudTrainingTimeout.current) clearTimeout(justStartedCloudTrainingTimeout.current);
-      justStartedCloudTrainingTimeout.current = setTimeout(() => setJustStartedCloudTraining(false), 6000);
-    } catch (err) {
-      setError(toErrorMessage(err, dict.botCard.cloudTrainingFailed));
-    } finally {
-      setIsStartingCloudTraining(false);
-    }
-  }
-
-  // Cancels the in-flight Cloud Training job and deletes its Hetzner server
-  // (see POST /api/train/cloud/stop, which reuses the same
-  // deleteHetznerServer() the reap cron uses). Returns the fresh bot DTO —
-  // its latestTrainingJob.status flips to CANCELLED, which is enough on its
-  // own to flip jobActive false below and unmount TrainingProgressBar, so
-  // there's nothing extra to do here to "stop polling".
-  async function handleStopTraining() {
-    if (!bot.latestTrainingJob) return;
-    if (!confirm(dict.botCard.confirmStopTraining)) {
-      return;
-    }
-    setError(null);
-    setIsStoppingTraining(true);
-    try {
-      const data = await apiFetch<{ bot: BotConfigurationDTO }>("/api/train/cloud/stop", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jobId: bot.latestTrainingJob.id }),
-      });
-      onUpdate(data.bot);
-    } catch (err) {
-      setError(toErrorMessage(err, dict.botCard.stopTrainingFailed));
-    } finally {
-      setIsStoppingTraining(false);
     }
   }
 
@@ -605,69 +493,8 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
         />
       )}
 
-      {justStartedCloudTraining && (
-        <div className="flex items-center gap-2 rounded-lg border border-primary/40 bg-primary/10 px-3 py-2.5 text-xs font-medium text-primary">
-          <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-          {dict.botCard.cloudTrainingStarted(bot.botName)}
-        </div>
-      )}
-
       <div className="space-y-2 rounded-lg border border-border p-3">
-        <TrainingModeToggle
-          mode={optimisticTrainingMode ?? bot.trainingMode}
-          onChange={handleTrainingModeChange}
-          disabled={jobActive || isTogglingTrainingMode}
-        />
-
-        {bot.latestTrainingJob && (
-          <div className="flex flex-col gap-1.5">
-            <TrainingStatusBadge status={bot.latestTrainingJob.status} />
-            {/* Full message, wrapped — never truncated. These reap/callback
-                reasons ("Reaped: no progress past QUEUED for over 20
-                minutes — ...") are exactly the part that explains what
-                happened, so cutting them off with an ellipsis defeated the
-                point of showing them at all. */}
-            {bot.latestTrainingJob.status === "FAILED" && bot.latestTrainingJob.errorMessage && (
-              <p className="whitespace-pre-wrap break-words text-[11px] text-red-400">
-                {bot.latestTrainingJob.errorMessage}
-              </p>
-            )}
-          </div>
-        )}
-
-        {bot.trainingMode === "CLOUD" ? (
-          <>
-            <button
-              type="button"
-              onClick={handleStartCloudTraining}
-              disabled={isStartingCloudTraining || jobActive}
-              className="flex w-full items-center justify-center gap-2 rounded-lg border border-primary/40 px-3 py-2 text-xs font-medium text-primary transition hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {isStartingCloudTraining || jobActive ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Cloud className="h-3.5 w-3.5" />
-              )}
-              {jobActive ? dict.botCard.trainingInCloud : dict.botCard.startCloudTraining}
-            </button>
-            {/* Own polling loop, distinct from BotFleetGrid's slower
-                fleet-wide refresh — see that component's doc comment. */}
-            {jobActive && bot.latestTrainingJob && (
-              <>
-                <TrainingProgressBar jobId={bot.latestTrainingJob.id} />
-                <button
-                  type="button"
-                  onClick={handleStopTraining}
-                  disabled={isStoppingTraining}
-                  className="flex w-full items-center justify-center gap-2 rounded-lg border border-red-500/40 px-3 py-2 text-xs font-medium text-red-400 transition hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {isStoppingTraining ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <XCircle className="h-3.5 w-3.5" />}
-                  {isStoppingTraining ? dict.botCard.stoppingTraining : dict.botCard.stopTraining}
-                </button>
-              </>
-            )}
-          </>
-        ) : isTauri() ? (
+        {isTauri() ? (
           <button
             type="button"
             onClick={handleStartLocalTraining}

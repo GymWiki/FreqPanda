@@ -66,8 +66,16 @@ export async function apiFetch<T = unknown>(input: string, init?: RequestInit): 
 // Small helper for the very common "I just want the error message for
 // this state.error string" case, so call sites don't all repeat the same
 // `err instanceof Error ? err.message : "..."` ternary.
+//
+// Tauri's own `invoke()` rejects a `Result<T, String>` command's Err case
+// with a plain string, not an Error/ApiError — so without this check, every
+// failure from src-tauri/src/main.rs's train_local_model (Docker not
+// running, download-data failing against every data source, etc.) fell
+// through both instanceof checks above and silently got replaced by the
+// generic fallback text, hiding the actual, useful reason from the user.
 export function toErrorMessage(err: unknown, fallback: string): string {
   if (err instanceof ApiError) return err.message;
   if (err instanceof Error) return err.message;
+  if (typeof err === "string" && err.trim()) return err;
   return fallback;
 }

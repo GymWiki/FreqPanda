@@ -31,8 +31,8 @@ export interface FreqAIFeatureConfig {
    * partially-NaN features — a real source of spurious, overfit-looking
    * signals independent of anything FreqAI itself learned. Set generously
    * above the largest indicatorPeriods entry, regardless of timeframe —
-   * lib/hetzner.ts also folds this into how many days of history a
-   * training run downloads (see buildFreqAITrainingArtifacts).
+   * src-tauri/src/main.rs also folds this into how many days of history a
+   * local training run downloads.
    */
   startupCandleCount: number;
 }

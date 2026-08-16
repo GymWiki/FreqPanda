@@ -8,8 +8,7 @@ export const dynamic = "force-dynamic";
 
 const INACTIVITY_DAYS = 7;
 
-// Same bearer-token pattern as /api/train/cloud/reap — an external
-// scheduler (e.g. cron-job.org) hits this daily with
+// An external scheduler (e.g. cron-job.org) hits this daily with
 // `Authorization: Bearer <CRON_SECRET>`, and a timing-safe compare is used
 // since this is hit over plain HTTP by a caller outside Vercel's own signed
 // cron mechanism.

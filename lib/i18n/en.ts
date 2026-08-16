@@ -32,29 +32,14 @@ export const en: Dictionary = {
     local: "Local only",
     liveOnVps: "Live in the cloud",
     inactive: "Inactive",
-    trainingQueued: "Queued",
-    training: "Training…",
-    trainingComplete: "Done",
-    trainingFailed: "Failed",
-    trainingCancelled: "Stopped",
-  },
-
-  trainingToggle: {
-    cloud: "Train AI in the cloud",
-    local: "Train AI on my own computer",
-    tooltip:
-      "In the cloud: we train the AI model on our own servers, you don't need to keep anything running. On your own computer: the model trains locally via the desktop app and then gets uploaded.",
   },
 
   botCard: {
     resumeFailed: "Couldn't resume",
     stopFailed: "Couldn't stop",
-    trainingModeUpdateFailed: "Couldn't change that",
     autoCompoundUpdateFailed: "Couldn't change 'reinvest profit'",
     uploadFailed: "Upload failed",
     localTrainingFailed: "Training on your computer failed",
-    cloudTrainingFailed: "Training AI in the cloud failed",
-    stopTrainingFailed: "Couldn't stop training",
     deployFailed: "Couldn't start",
     loadCredentialsFailed: "Couldn't load login details",
     removeFailed: "Couldn't remove",
@@ -62,7 +47,6 @@ export const en: Dictionary = {
 
     confirmStop: (botName: string) =>
       `Stop ${botName}? No new positions will open — existing open positions keep running. You can resume it again afterward.`,
-    confirmStopTraining: "Stop training? The cloud server will be deleted immediately.",
     confirmRemove: (botName: string) => `Remove ${botName}? This can't be undone.`,
     confirmDisconnectExchange: "Disconnect the account from this bot?",
 
@@ -92,14 +76,9 @@ export const en: Dictionary = {
     realMoney: "Real money",
     goLive: "Switch to real money",
 
-    cloudTrainingStarted: (botName: string) => `Started training AI for ${botName} — this can take a while.`,
-    trainingInCloud: "Training in the cloud…",
-    startCloudTraining: "Train AI in the cloud",
-    stoppingTraining: "Stopping…",
-    stopTraining: "Stop training",
     trainingLocally: "Training on your computer…",
     startLocalTraining: "Train AI on my computer",
-    localTrainingNeedsApp: "Training on your own computer needs the desktop app — download it from the website, or train in the cloud instead.",
+    localTrainingNeedsApp: "Training needs the desktop app — download it from the website.",
     modelUploaded: "Model uploaded — replace it manually if needed",
     orUploadManually: "Or upload a model file yourself (.joblib)",
 

@@ -3,10 +3,8 @@ import { createClient } from "@/lib/supabase/server";
 import { prisma } from "@/lib/prisma";
 import { Navbar } from "@/components/Navbar";
 import { TelegramSettingsForm } from "@/components/TelegramSettingsForm";
-import { DataServerAdminPanel } from "@/components/DataServerAdminPanel";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { I18nProvider } from "@/components/I18nProvider";
-import { isAdminUser } from "@/lib/admin";
 import { getUserLocale } from "@/lib/profile-locale";
 import { getDictionary } from "@/lib/i18n";
 
@@ -50,10 +48,6 @@ export default async function SettingsPage() {
           <div className="space-y-6">
             <LanguageSwitcher initialLocale={locale} />
             <TelegramSettingsForm initialChatId={profile.telegramChatId} />
-
-            {/* Operator-only — see lib/admin.ts. Manages the one permanent
-                data server this app depends on (app/api/admin/data-server). */}
-            {isAdminUser(user.email) && <DataServerAdminPanel />}
           </div>
         </main>
       </div>

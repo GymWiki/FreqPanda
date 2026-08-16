@@ -1,8 +1,6 @@
 import type { FreqAIProfileConfig } from "@/lib/strategy-presets";
 
 export type DeploymentStatus = "LOCAL" | "VPS_ACTIVE" | "INACTIVE";
-export type TrainingMode = "LOCAL" | "CLOUD";
-export type TrainingStatus = "QUEUED" | "TRAINING" | "COMPLETED" | "FAILED" | "CANCELLED";
 // "Try before you risk": every bot is born (and stays) in
 // TRAINING_PAPER_TRADE until it clears the Go Live flow — see the enum
 // doc comment in prisma/schema.prisma for the full state machine.
@@ -15,14 +13,6 @@ export type BotStatus =
   | "PAUSED_EMERGENCY"
   | "SLEEPING"
   | "PAUSED_MANUAL";
-
-export interface TrainingJobDTO {
-  id: string;
-  status: TrainingStatus;
-  mode: TrainingMode;
-  errorMessage: string | null;
-  createdAt: string | Date;
-}
 
 export interface ExchangeConnectionDTO {
   id: string;
@@ -60,7 +50,5 @@ export interface BotConfigurationDTO {
   apiServerUsername: string | null;
   status: BotStatus;
   lastError: string | null;
-  trainingMode: TrainingMode;
-  latestTrainingJob: TrainingJobDTO | null;
   createdAt: string | Date;
 }
