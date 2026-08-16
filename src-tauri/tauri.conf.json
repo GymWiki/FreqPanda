@@ -4,14 +4,14 @@
   "version": "0.1.0",
   "identifier": "com.freqtradecommandcenter.app",
   "build": {
-    "frontendDist": "https://REPLACE-WITH-YOUR-DEPLOYED-DOMAIN.example.com"
+    "frontendDist": "https://freqpanda.com"
   },
   "app": {
     "windows": [
       {
         "label": "main",
         "title": "Freqtrade Command Center",
-        "url": "/login",
+        "url": "https://freqpanda.com/login",
         "width": 1280,
         "height": 800,
         "minWidth": 1024,

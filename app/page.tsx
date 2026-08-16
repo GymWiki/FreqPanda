@@ -12,6 +12,13 @@ const displayFont = Space_Grotesk({ subsets: ["latin"], variable: "--font-panda-
 const bodyFont = Manrope({ subsets: ["latin"], variable: "--font-panda-body" });
 const monoFont = IBM_Plex_Mono({ subsets: ["latin"], weight: ["400", "500"], variable: "--font-panda-mono" });
 
+// Until NEXT_PUBLIC_DESKTOP_APP_WINDOWS_URL/_MAC_URL point at real, direct
+// installer files, both download buttons fall back to the GitHub Releases
+// page instead of "#" — a build now actually exists there (see
+// .github/workflows/release-desktop-app.yml), and landing on a page that
+// lists real installers beats a click that visibly does nothing.
+const DESKTOP_APP_RELEASES_URL = "https://github.com/GymWiki/Trading-platform/releases/latest";
+
 const FEATURES = [
   {
     icon: Cpu,
@@ -118,7 +125,7 @@ export default async function LandingPage() {
                   <ArrowRight className="h-4 w-4" />
                 </Link>
                 <a
-                  href={process.env.NEXT_PUBLIC_DESKTOP_APP_WINDOWS_URL || "#"}
+                  href={process.env.NEXT_PUBLIC_DESKTOP_APP_WINDOWS_URL || DESKTOP_APP_RELEASES_URL}
                   className="flex items-center gap-2 rounded-xl bg-panda-charcoal px-6 py-3.5 text-sm font-semibold text-panda-cream transition hover:bg-panda-charcoal-light"
                 >
                   <Download className="h-4 w-4" />
@@ -128,7 +135,7 @@ export default async function LandingPage() {
               <p className="mt-3 font-panda-mono text-xs text-panda-mist">
                 macOS-build{" "}
                 <a
-                  href={process.env.NEXT_PUBLIC_DESKTOP_APP_MAC_URL || "#"}
+                  href={process.env.NEXT_PUBLIC_DESKTOP_APP_MAC_URL || DESKTOP_APP_RELEASES_URL}
                   className="underline underline-offset-2 hover:text-panda-bamboo"
                 >
                   hier beschikbaar

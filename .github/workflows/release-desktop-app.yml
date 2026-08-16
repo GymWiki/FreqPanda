@@ -1,0 +1,62 @@
+name: Build & release desktop app
+
+# The desktop app (src-tauri/) is just a thin native shell around the
+# already-deployed web dashboard (frontendDist in tauri.conf.json points at
+# https://freqpanda.com, not a local build) — so this workflow only ever
+# compiles the Rust/Tauri binary, never the Next.js app itself.
+#
+# Triggered by pushing a tag like `app-v0.1.0` (kept distinct from any web
+# release tags), or manually via workflow_dispatch for a one-off rebuild.
+on:
+  push:
+    tags:
+      - "app-v*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+          - platform: macos-latest
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Only needed to get the @tauri-apps/cli devDependency on PATH (via
+      # `npm run tauri`, see package.json) — the desktop app has no local
+      # frontend of its own to build, see the note above.
+      - name: Install root npm dependencies
+        run: npm ci
+
+      - name: Build and publish release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "FreqPanda Desktop ${{ github.ref_name }}"
+          releaseBody: |
+            Automated build from ${{ github.sha }}. Unsigned installers —
+            Windows SmartScreen and macOS Gatekeeper will warn on first run
+            until this is code-signed.
+          # Published as a draft: nobody has verified an unsigned,
+          # never-before-built installer from this pipeline actually runs
+          # yet. Review the attached assets and hit "Publish" on the
+          # release once confirmed, rather than this workflow exposing an
+          # unverified binary to users automatically.
+          releaseDraft: true
+          prerelease: false
