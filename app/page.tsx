@@ -66,7 +66,7 @@ export default async function LandingPage() {
       <header className="sticky top-0 z-50 border-b border-panda-charcoal-light bg-panda-ink/90 backdrop-blur">
         <nav className="mx-auto flex max-w-6xl items-center justify-between px-4 py-4 sm:px-6">
           <Link href="/" className="flex items-center gap-2">
-            <span className="text-2xl leading-none">🐼</span>
+            <img src="/logo/panda-bg-64.png" alt="FreqPanda" className="h-7 w-7 rounded-full" />
             <span className="font-panda-display text-lg font-semibold tracking-tight text-panda-cream">
               FreqPanda
             </span>
@@ -145,12 +145,10 @@ export default async function LandingPage() {
               </p>
             </div>
 
-            {/* Mascot — the same signature element as /platform's
-                PandaHero, scaled up as this page's hero visual. Swap for
-                an <img>/<video> sprite the same way once that asset lands. */}
+            {/* Mascot — this page's signature hero visual. */}
             <div className="relative shrink-0">
-              <div className="flex h-40 w-40 items-center justify-center rounded-full border-2 border-dashed border-panda-bamboo/40 bg-panda-charcoal text-7xl sm:h-52 sm:w-52 sm:text-8xl">
-                🐼
+              <div className="h-40 w-40 overflow-hidden rounded-full border-2 border-dashed border-panda-bamboo/40 bg-panda-cream sm:h-52 sm:w-52">
+                <img src="/logo/panda-bg-512.png" alt="FreqPanda" className="h-full w-full object-cover" />
               </div>
               <div className="absolute -left-6 top-2 rounded-full bg-panda-bamboo px-3 py-1.5 text-xs font-medium text-panda-ink shadow-md sm:-left-8">
                 Ik train, jij chillt 🎋

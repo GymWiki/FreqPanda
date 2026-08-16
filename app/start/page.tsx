@@ -32,13 +32,13 @@ export default async function DesktopStartPage() {
     >
       <div className="flex flex-col items-center gap-8 text-center">
         <div className="flex items-center gap-2">
-          <span className="text-2xl leading-none">🐼</span>
+          <img src="/logo/panda-bg-64.png" alt="FreqPanda" className="h-7 w-7 rounded-full" />
           <span className="font-panda-display text-lg font-semibold tracking-tight">FreqPanda</span>
         </div>
 
         <div className="relative">
-          <div className="flex h-32 w-32 items-center justify-center rounded-full border-2 border-dashed border-panda-bamboo/40 bg-panda-charcoal text-6xl">
-            🐼
+          <div className="h-32 w-32 overflow-hidden rounded-full border-2 border-dashed border-panda-bamboo/40 bg-panda-cream">
+            <img src="/logo/panda-bg-512.png" alt="FreqPanda" className="h-full w-full object-cover" />
           </div>
           <div className="absolute -bottom-3 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full bg-panda-bamboo px-3 py-1.5 text-xs font-medium text-panda-ink shadow-md">
             Ik train, jij chillt 🎋

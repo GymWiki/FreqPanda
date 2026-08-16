@@ -52,7 +52,7 @@ function LoginForm() {
     <div className="flex min-h-screen items-center justify-center bg-background px-6">
       <div className="w-full max-w-sm">
         <Link href="/" className="mb-8 flex items-center justify-center gap-2">
-          <span className="text-2xl leading-none">🐼</span>
+          <img src="/logo/panda-bg-64.png" alt="FreqPanda" className="h-7 w-7 rounded-full" />
           <span className="font-display font-semibold tracking-tight">FreqPanda</span>
         </Link>
 
