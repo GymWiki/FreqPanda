@@ -192,6 +192,34 @@ async fn train_local_model(
         )
     };
 
+    // Concrete top-N pairlist enforcement (never the ".*/USDT" wildcard —
+    // see resolve_auto_select_pairs' own doc comment for why that wildcard
+    // breaks download-data) only actually happens the moment a download
+    // genuinely runs. run_freqtrade_step_resumable's container-name
+    // resumability keys purely on bot_id+step, so on its own it can't tell
+    // "this bot's download already finished — for this same request"
+    // apart from "already finished, for a DIFFERENT top-N count or manual
+    // pairlist picked after that". Without this check, moving the pair-
+    // count slider (or editing the manual list) and clicking Train again
+    // would silently reattach/skip into the *previous* selection's
+    // container forever — the exact regression this comment is guarding
+    // against. download_identity captures what download-data is actually
+    // being asked to fetch this call; comparing it against the marker
+    // written after the last successful download (below) is what makes
+    // that enforcement hold on a resumed/reattached run too, not just a
+    // bot's very first training run.
+    let download_identity = compute_download_identity(&static_download_pairs, clamped_pair_count, &timerange);
+    let download_identity_path = user_data_dir.join(".download-identity");
+    let previous_download_identity = std::fs::read_to_string(&download_identity_path).ok();
+    if previous_download_identity.as_deref() != Some(download_identity.as_str()) {
+        emit_status(
+            &app,
+            &bot_id,
+            "=== pairlist selection (or timerange) changed since the last local training run — discarding the previous download ===",
+        );
+        remove_container(&download_container).await;
+    }
+
     let config = serde_json::json!({
         "stake_currency": "USDT",
         "stake_amount": "unlimited",
@@ -292,6 +320,12 @@ async fn train_local_model(
             DATA_SOURCE_EXCHANGES.join(", ")
         ));
     }
+    // Record what actually got downloaded this time, so the *next* call
+    // (fresh, resumed, or reattached) can tell whether it's still the same
+    // request — see download_identity's own comment above for why this
+    // matters. Best-effort: a failure to persist it just means the next
+    // run treats this one as stale and redownloads, never the reverse.
+    let _ = std::fs::write(&download_identity_path, &download_identity);
 
     run_freqtrade_step_resumable(
         &app,
@@ -363,10 +397,78 @@ fn training_container_name(bot_id: &str, step: &str) -> String {
     format!("freqpanda-train-{bot_id}-{step}")
 }
 
+// pairs must be a concrete list here, never the ".*/USDT" wildcard — see
+// resolve_auto_select_pairs' doc comment for why that wildcard breaks
+// download-data. This string only has to change whenever the *requested*
+// download changes (pair count, manual pairlist, or timerange), not
+// reproduce the request exactly — see the regression tests below, which
+// exist because this exact bug (a changed slider value silently reusing a
+// stale container's old data) has shipped once already.
+fn compute_download_identity(
+    static_download_pairs: &Option<Vec<String>>,
+    clamped_pair_count: u32,
+    timerange: &str,
+) -> String {
+    match static_download_pairs {
+        Some(pairs) => format!("manual:{}:{timerange}", pairs.join(",")),
+        None => format!("auto:{clamped_pair_count}:{timerange}"),
+    }
+}
+
+#[cfg(test)]
+mod download_identity_tests {
+    use super::compute_download_identity;
+
+    // Regression coverage for "the top-N slider stopped limiting the
+    // download after the idempotent-training refactor": that refactor
+    // made run_freqtrade_step_resumable skip/reattach based purely on a
+    // bot_id-scoped container name, which can't by itself distinguish
+    // "already downloaded this exact selection" from "already downloaded
+    // a DIFFERENT selection". These tests pin down that the identity
+    // string this now gates on actually varies with everything that
+    // changes what download-data is asked to fetch.
+    #[test]
+    fn changes_with_auto_select_pair_count() {
+        let a = compute_download_identity(&None, 20, "20260101-20260601");
+        let b = compute_download_identity(&None, 30, "20260101-20260601");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn changes_with_manual_pairlist() {
+        let a = compute_download_identity(&Some(vec!["BTC/USDT".into(), "ETH/USDT".into()]), 20, "20260101-20260601");
+        let b = compute_download_identity(&Some(vec!["BTC/USDT".into()]), 20, "20260101-20260601");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn changes_with_timerange() {
+        let a = compute_download_identity(&None, 20, "20260101-20260601");
+        let b = compute_download_identity(&None, 20, "20260101-20260701");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn stable_for_an_identical_repeated_request() {
+        let a = compute_download_identity(&None, 20, "20260101-20260601");
+        let b = compute_download_identity(&None, 20, "20260101-20260601");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn auto_select_and_manual_never_collide() {
+        // Same "20" appearing in both a pair count and a pairlist should
+        // never accidentally produce the same identity.
+        let auto = compute_download_identity(&None, 20, "20260101-20260601");
+        let manual = compute_download_identity(&Some(vec!["20".into()]), 999, "20260101-20260601");
+        assert_ne!(auto, manual);
+    }
+}
+
 async fn remove_container(name: &str) {
     let mut cmd = Command::new("docker");
     cmd.args(["rm", "-f", name]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-    hide_console_window(&mut cmd);
+    hide_console_window(&mut cmd); // required here — see fix 22885bb; keep on every new Command in this file
     let _ = cmd.output().await;
 }
 
@@ -382,7 +484,7 @@ async fn inspect_container(name: &str) -> ContainerState {
     cmd.args(["inspect", "--format", "{{.State.Running}} {{.State.ExitCode}}", name])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
-    hide_console_window(&mut cmd);
+    hide_console_window(&mut cmd); // required here — see fix 22885bb; keep on every new Command in this file
     let output = match cmd.output().await {
         Ok(o) => o,
         Err(_) => return ContainerState::Missing,
@@ -503,7 +605,7 @@ async fn docker_state() -> DockerState {
     cmd.arg("info")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    hide_console_window(&mut cmd);
+    hide_console_window(&mut cmd); // required here — see fix 22885bb; keep on every new Command in this file
     match cmd.status().await {
         Ok(status) if status.success() => DockerState::Ready,
         Ok(_) => DockerState::NotRunning,
@@ -590,7 +692,7 @@ fn launch_installed_docker_desktop() -> Result<(), String> {
             return Err("Docker Desktop.exe was not found at the expected install path".into());
         }
         let mut cmd = Command::new(exe);
-        hide_console_window(&mut cmd);
+        hide_console_window(&mut cmd); // required here — see fix 22885bb; keep on every new Command in this file
         return cmd.spawn().map(|_| ()).map_err(|e| e.to_string());
     }
     #[cfg(target_os = "macos")]
@@ -680,7 +782,7 @@ fn launch_downloaded_installer(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         let mut cmd = Command::new(path);
-        hide_console_window(&mut cmd);
+        hide_console_window(&mut cmd); // required here — see fix 22885bb; keep on every new Command in this file
         return cmd.spawn().map(|_| ()).map_err(|e| e.to_string());
     }
     #[cfg(target_os = "macos")]
@@ -733,7 +835,7 @@ async fn resolve_auto_select_pairs(
     ])
     .stdout(std::process::Stdio::piped())
     .stderr(std::process::Stdio::piped());
-    hide_console_window(&mut cmd);
+    hide_console_window(&mut cmd); // required here — see fix 22885bb; keep on every new Command in this file
 
     let output = cmd.output().await.map_err(|e| format!("could not spawn docker: {e}"))?;
     if !output.status.success() {
@@ -812,7 +914,7 @@ async fn run_freqtrade_step_resumable(
         .args(&docker_args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    hide_console_window(&mut docker_cmd);
+    hide_console_window(&mut docker_cmd); // required here — see fix 22885bb; keep on every new Command in this file
     let mut child = docker_cmd
         .spawn()
         .map_err(|e| format!("could not spawn docker (is Docker Desktop running?): {e}"))?;
@@ -841,7 +943,7 @@ async fn follow_and_wait(app: &AppHandle, bot_id: &str, container_name: &str) ->
         .args(["logs", "-f", container_name])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
-    hide_console_window(&mut logs_cmd);
+    hide_console_window(&mut logs_cmd); // required here — see fix 22885bb; keep on every new Command in this file
     let mut logs_child = logs_cmd
         .spawn()
         .map_err(|e| format!("could not attach to the already-running container: {e}"))?;
@@ -852,7 +954,7 @@ async fn follow_and_wait(app: &AppHandle, bot_id: &str, container_name: &str) ->
 
     let mut wait_cmd = Command::new("docker");
     wait_cmd.args(["wait", container_name]).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
-    hide_console_window(&mut wait_cmd);
+    hide_console_window(&mut wait_cmd); // required here — see fix 22885bb; keep on every new Command in this file
     let output = wait_cmd.output().await.map_err(|e| format!("could not wait for container to finish: {e}"))?;
     let exit_code: i32 = String::from_utf8_lossy(&output.stdout).trim().parse().unwrap_or(-1);
     if exit_code != 0 {
