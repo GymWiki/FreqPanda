@@ -849,7 +849,7 @@ dependencies = [
 
 [[package]]
 name = "freqtrade-command-center"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "serde",
  "serde_json",

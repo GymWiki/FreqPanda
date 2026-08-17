@@ -1,17 +1,17 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Freqtrade Command Center",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "identifier": "com.freqtradecommandcenter.app",
   "build": {
-    "frontendDist": "https://freqpanda.com"
+    "frontendDist": "https://www.freqpanda.com"
   },
   "app": {
     "windows": [
       {
         "label": "main",
         "title": "Freqtrade Command Center",
-        "url": "https://freqpanda.com/start",
+        "url": "https://www.freqpanda.com/start",
         "width": 1280,
         "height": 800,
         "minWidth": 1024,

@@ -1,10 +1,10 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capabilities for the main window. IMPORTANT: this app has no local frontend at all — build.frontendDist and every window.url point at the live https://freqpanda.com site — so a Capability's permissions are inert unless `remote` explicitly lists that origin (Capability.local, defaulting to true, only covers Tauri's own asset:// local content). Without it, no permission below ever actually applies, regardless of what's listed — this is what a plain 'Command X not allowed by ACL' turned out to mean, even with a correct per-command permission defined. Scoped tightly to this app's own domain, never a wildcard, since remote+local-system access (fs, custom commands) is exactly the combination this field's own upstream doc comment warns about.",
+  "description": "Capabilities for the main window. IMPORTANT: this app has no local frontend at all — build.frontendDist and every window.url point at the live website — so a Capability's permissions are inert unless `remote` explicitly lists the origin actually loaded (Capability.local, defaulting to true, only covers Tauri's own asset:// local content). Without it, no permission below ever actually applies, regardless of what's listed — this is what a plain 'Command X not allowed by ACL' turned out to mean, even with a correct per-command permission defined. Both apex and www are listed: freqpanda.com itself sends a 308 redirect to www.freqpanda.com (confirmed by fetching it directly), so the webview's real, final origin is the www one even though tauri.conf.json's frontendDist/window.url are set to www.freqpanda.com already too — apex is kept here only as a safety net against ever pointing a URL at the bare domain again. Never a wildcard beyond this app's own domain, since remote+local-system access (fs, custom commands) is exactly the combination this field's own upstream doc comment warns about.",
   "windows": ["main"],
   "remote": {
-    "urls": ["https://freqpanda.com/*"]
+    "urls": ["https://www.freqpanda.com/*", "https://freqpanda.com/*"]
   },
   "permissions": [
     "core:default",
