@@ -1,8 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capabilities for the main window: read access to the app's own local data dir only, where trained models are written before upload.",
+  "description": "Capabilities for the main window. IMPORTANT: this app has no local frontend at all — build.frontendDist and every window.url point at the live https://freqpanda.com site — so a Capability's permissions are inert unless `remote` explicitly lists that origin (Capability.local, defaulting to true, only covers Tauri's own asset:// local content). Without it, no permission below ever actually applies, regardless of what's listed — this is what a plain 'Command X not allowed by ACL' turned out to mean, even with a correct per-command permission defined. Scoped tightly to this app's own domain, never a wildcard, since remote+local-system access (fs, custom commands) is exactly the combination this field's own upstream doc comment warns about.",
   "windows": ["main"],
+  "remote": {
+    "urls": ["https://freqpanda.com/*"]
+  },
   "permissions": [
     "core:default",
     "allow-train-local-model",
