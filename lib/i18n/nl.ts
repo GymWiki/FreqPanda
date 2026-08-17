@@ -91,6 +91,7 @@ export const nl = {
 
     trainingLocally: "Wordt getraind op je pc…",
     startLocalTraining: "AI trainen op mijn pc",
+    retrainLocally: "Opnieuw trainen",
     localTrainingNeedsApp: "Trainen vereist de desktop-app — download 'm op de website.",
     modelUploaded: "Model geüpload — vervang handmatig indien nodig",
     orUploadManually: "Of upload zelf een modelbestand (.joblib)",

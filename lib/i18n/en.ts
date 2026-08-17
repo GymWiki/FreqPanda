@@ -90,6 +90,7 @@ export const en: Dictionary = {
 
     trainingLocally: "Training on your computer…",
     startLocalTraining: "Train AI on my computer",
+    retrainLocally: "Retrain from scratch",
     localTrainingNeedsApp: "Training needs the desktop app — download it from the website.",
     modelUploaded: "Model uploaded — replace it manually if needed",
     orUploadManually: "Or upload a model file yourself (.joblib)",

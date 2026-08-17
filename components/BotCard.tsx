@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Download,
   Rocket,
@@ -84,6 +84,35 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
   // alone (disabling the button) is a courtesy for slow networks, not a
   // correctness guarantee.
   const autoCompoundInFlight = useRef(false);
+
+  // Reconnects to a local training run that's still going (or finished
+  // without ever getting uploaded) after this card remounts — a page
+  // refresh mid-download used to just show the idle "start training"
+  // button again while a second click would spawn a competing docker
+  // process alongside the still-running first one. Only relevant while no
+  // model is recorded yet; once bot.aiModelPath is set there's nothing
+  // left to reconnect to. handleStartLocalTraining itself is what's
+  // idempotent (see its own doc comment) — this effect just decides
+  // whether to call it automatically on mount.
+  useEffect(() => {
+    if (!isTauri() || bot.aiModelPath) return;
+    let cancelled = false;
+    (async () => {
+      const { invoke } = await import("@tauri-apps/api/core");
+      try {
+        const status = await invoke<{ state: string }>("local_training_status", { botId: bot.id });
+        if (!cancelled && status.state !== "not_started") {
+          handleStartLocalTraining();
+        }
+      } catch {
+        // Best-effort — a failed status check just leaves the normal idle
+        // "start training" button visible, same as before this existed.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [bot.id]);
 
   const lifecycleStatus = deriveLifecycleStatus(bot, isTrainingLocally);
   const canGoLive = bot.status === "TRAINING_PAPER_TRADE" && bot.deploymentStatus === "VPS_ACTIVE";
@@ -180,7 +209,17 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
   // file pick — no separate auth/upload path in Rust, since this JS runs
   // inside the same authenticated dashboard session whether it's a browser
   // tab or the Tauri webview.
-  async function handleStartLocalTraining() {
+  // forceRetrain=false (the normal path — the button click, and the
+  // reconnect-on-mount effect below) is what makes this safe to call
+  // freely without ever redoing finished work: train_local_model itself
+  // is idempotent per bot (see run_freqtrade_step_resumable in
+  // src-tauri/src/main.rs), so calling it again just reattaches to
+  // whatever's already downloading/training, or — if both steps already
+  // finished while nobody was watching (e.g. the page got refreshed right
+  // as it completed) — immediately picks up the resulting model and
+  // finishes the upload below. forceRetrain=true (the explicit "Opnieuw
+  // trainen" action) is the only path that actually discards prior work.
+  async function handleStartLocalTraining(forceRetrain = false) {
     setError(null);
     setTrainingStatus(null);
     setIsTrainingLocally(true);
@@ -212,6 +251,7 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
         autoSelectCoins: bot.autoSelectCoins,
         autoSelectPairCount: bot.autoSelectPairCount,
         pairWhitelist: bot.pairWhitelist ?? "",
+        forceRetrain,
       });
 
       const bytes = await readFile(modelPath);
@@ -531,7 +571,7 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
           <>
             <button
               type="button"
-              onClick={handleStartLocalTraining}
+              onClick={() => handleStartLocalTraining()}
               disabled={isTrainingLocally}
               className="flex w-full items-center justify-center gap-2 rounded-lg border border-primary/40 px-3 py-2 text-xs font-medium text-primary transition hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-50"
             >
@@ -542,6 +582,21 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
               <p className="truncate text-center text-[11px] text-slate-500" title={trainingStatus}>
                 {trainingStatus.replace(/^=== | ===$/g, "")}
               </p>
+            )}
+            {!isTrainingLocally && (
+              // Explicit, separate action — the only way old
+              // download/training work ever gets discarded (see
+              // force_retrain in src-tauri/src/main.rs). The main button
+              // above never does this on its own: refreshing the page and
+              // clicking it again just reattaches to/finishes whatever
+              // was already in progress.
+              <button
+                type="button"
+                onClick={() => handleStartLocalTraining(true)}
+                className="w-full text-center text-[11px] text-slate-500 transition hover:text-primary"
+              >
+                {dict.botCard.retrainLocally}
+              </button>
             )}
           </>
         ) : (

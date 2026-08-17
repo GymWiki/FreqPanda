@@ -46,6 +46,7 @@ async fn train_local_model(
     auto_select_coins: bool,
     auto_select_pair_count: u32,
     pair_whitelist: String,
+    force_retrain: bool,
 ) -> Result<String, String> {
     // `strategy` becomes a filename (user_data/strategies/<strategy>.py) —
     // reject anything that isn't a plain identifier before it's ever used
@@ -63,6 +64,15 @@ async fn train_local_model(
     // download failed against every data source" error after the exchange
     // retry loop already ran. The user should only ever have to click Train.
     ensure_docker_ready(&app, &bot_id).await?;
+
+    let download_container = training_container_name(&bot_id, "download");
+    let backtest_container = training_container_name(&bot_id, "backtest");
+    if force_retrain {
+        emit_status(&app, &bot_id, "=== retrain requested: clearing this bot's previous local download/training run ===");
+        for name in [&download_container, &backtest_container] {
+            remove_container(name).await;
+        }
+    }
 
     let work_dir = app
         .path()
@@ -240,7 +250,7 @@ async fn train_local_model(
         let mut download_data_args: Vec<&str> =
             vec!["download-data", "--config", "user_data/config.json", "--timeframes", "5m", "--pairs"];
         download_data_args.extend(download_data_pairs.iter().map(|p| p.as_str()));
-        match run_freqtrade_step(&app, &bot_id, &work_dir, &download_data_args).await {
+        match run_freqtrade_step_resumable(&app, &bot_id, &work_dir, &download_container, &download_data_args).await {
             Ok(()) => {
                 download_ok = true;
                 break;
@@ -255,10 +265,11 @@ async fn train_local_model(
         ));
     }
 
-    run_freqtrade_step(
+    run_freqtrade_step_resumable(
         &app,
         &bot_id,
         &work_dir,
+        &backtest_container,
         &[
             "backtesting",
             "--config",
@@ -275,14 +286,146 @@ async fn train_local_model(
     let mut joblib_files = Vec::new();
     collect_joblib_files(&models_dir, &mut joblib_files)?;
 
-    match joblib_files.as_slice() {
+    let result = match joblib_files.as_slice() {
         [single] => Ok(single.to_string_lossy().to_string()),
         [] => Err("training finished but produced no .joblib model file".into()),
         multiple => Err(format!(
             "expected exactly 1 .joblib model file, found {} — refusing to guess which one to upload",
             multiple.len()
         )),
+    };
+    // Both containers have done their job once a model's been collected —
+    // remove them so a genuinely fresh future training run (a new bot, or
+    // this one after force_retrain) never has to reason about stale state
+    // left over from this one.
+    if result.is_ok() {
+        for name in [&download_container, &backtest_container] {
+            remove_container(name).await;
+        }
     }
+    result
+}
+
+// Deliberately no in-memory "is this bot already training" guard here.
+// The obvious version of one (a Mutex<HashSet<bot_id>> held for the
+// duration of train_local_model) would actively break the page-refresh
+// case this whole feature exists for: after a refresh, the *old* call is
+// still running server-side (orphaned, but never cancelled — Tauri has no
+// way to know its caller navigated away), so a naive guard would see the
+// bot_id already present and reject the *new* call's reconnection attempt
+// outright, right as BotCard.tsx's reconnect-on-mount effect tries to
+// resubscribe to its progress events. Concurrency safety instead comes
+// entirely from Docker's own atomic container naming (see
+// run_freqtrade_step_resumable below): two calls racing into `docker run
+// --name X` at the exact same moment can only ever have one succeed, and
+// the loser gets a clean, ordinary error rather than a silent duplicate
+// download — a narrow enough window (both calls have to hit that one
+// instant with no container yet existing) that it isn't worth a lock that
+// would otherwise misfire on every ordinary refresh.
+
+// Stable per bot+step, so a later invocation — a page refresh, or this
+// whole app being closed and reopened — can find and reattach to the same
+// container Docker is still running (or has already finished), instead of
+// blindly starting a second one. Only the two long-running, actually
+// worth resuming steps get named containers (download, backtest);
+// test-pairlist stays a plain `--rm` run, it's fast and stateless.
+fn training_container_name(bot_id: &str, step: &str) -> String {
+    format!("freqpanda-train-{bot_id}-{step}")
+}
+
+async fn remove_container(name: &str) {
+    let mut cmd = Command::new("docker");
+    cmd.args(["rm", "-f", name]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    hide_console_window(&mut cmd);
+    let _ = cmd.output().await;
+}
+
+enum ContainerState {
+    Missing,
+    Running,
+    ExitedOk,
+    ExitedError,
+}
+
+async fn inspect_container(name: &str) -> ContainerState {
+    let mut cmd = Command::new("docker");
+    cmd.args(["inspect", "--format", "{{.State.Running}} {{.State.ExitCode}}", name])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    hide_console_window(&mut cmd);
+    let output = match cmd.output().await {
+        Ok(o) => o,
+        Err(_) => return ContainerState::Missing,
+    };
+    // `docker inspect` exits non-zero when no container with this name
+    // exists at all — the common case for a bot that's never been trained.
+    if !output.status.success() {
+        return ContainerState::Missing;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut parts = stdout.trim().split_whitespace();
+    let running = parts.next() == Some("true");
+    if running {
+        return ContainerState::Running;
+    }
+    match parts.next().and_then(|s| s.parse::<i32>().ok()) {
+        Some(0) => ContainerState::ExitedOk,
+        _ => ContainerState::ExitedError,
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalTrainingStatus {
+    // "not_started" | "downloading" | "training" | "model_ready" — a plain
+    // string rather than a Rust enum with #[serde(tag)] machinery, since
+    // this crosses straight into a JS string-literal union
+    // (components/BotCard.tsx) with nothing else consuming it on either
+    // side that would benefit from more structure.
+    state: String,
+}
+
+// Called from BotCard.tsx on mount (desktop only) — this is what lets a
+// page refresh reconnect instead of showing a stale "not started" button:
+// the frontend calls this first and only re-invokes train_local_model
+// itself (which then reattaches rather than restarts, see
+// run_freqtrade_step_resumable) when something is actually still in
+// flight. Never spawns anything — purely reads existing Docker container
+// state plus whatever's already on disk.
+#[tauri::command]
+async fn local_training_status(app: AppHandle, bot_id: String) -> Result<LocalTrainingStatus, String> {
+    let work_dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("could not resolve app data dir: {e}"))?
+        .join("freqtrade")
+        .join(&bot_id);
+
+    let backtest_container = training_container_name(&bot_id, "backtest");
+    match inspect_container(&backtest_container).await {
+        ContainerState::Running => {
+            return Ok(LocalTrainingStatus { state: "training".into() });
+        }
+        ContainerState::ExitedOk => {
+            let models_dir = work_dir.join("user_data").join("models");
+            let mut joblib_files = Vec::new();
+            let _ = collect_joblib_files(&models_dir, &mut joblib_files);
+            if !joblib_files.is_empty() {
+                return Ok(LocalTrainingStatus { state: "model_ready".into() });
+            }
+        }
+        ContainerState::Missing | ContainerState::ExitedError => {}
+    }
+
+    let download_container = training_container_name(&bot_id, "download");
+    match inspect_container(&download_container).await {
+        ContainerState::Running | ContainerState::ExitedOk => {
+            return Ok(LocalTrainingStatus { state: "downloading".into() });
+        }
+        ContainerState::Missing | ContainerState::ExitedError => {}
+    }
+
+    Ok(LocalTrainingStatus { state: "not_started".into() })
 }
 
 fn is_safe_python_identifier(value: &str) -> bool {
@@ -306,7 +449,7 @@ enum DockerState {
 // on every invocation, even with stdout/stderr piped to null/captured:
 // piping output doesn't suppress the console window itself on Windows,
 // only CREATE_NO_WINDOW does. This app already streams that output into
-// its own UI (see run_freqtrade_step's training-progress events), so the
+// its own UI (see run_freqtrade_step_resumable's training-progress events), so the
 // OS console window is never anything but confusing chrome. No-op on
 // macOS, which has no equivalent console-window concept — applied to
 // every Command in this file for consistency, including the two that
@@ -320,7 +463,7 @@ fn hide_console_window(cmd: &mut Command) {
 #[cfg(not(target_os = "windows"))]
 fn hide_console_window(_cmd: &mut Command) {}
 
-// `docker run` itself (in run_freqtrade_step) can't tell these apart from
+// `docker run` itself (in run_freqtrade_step_resumable) can't tell these apart from
 // its own io::Error alone in a way that's worth surfacing differently, but
 // `docker info` can: NotFound means the binary isn't on PATH at all (Docker
 // was never installed), anything else means it's installed but the daemon
@@ -580,10 +723,54 @@ async fn resolve_auto_select_pairs(
     Ok(pairs)
 }
 
-async fn run_freqtrade_step(app: &AppHandle, bot_id: &str, work_dir: &Path, args: &[&str]) -> Result<(), String> {
+// Streams a spawned child's stdout into training-progress events — the one
+// piece both a fresh `docker run` and reattaching to an already-running
+// container (via `docker logs -f`) need identically, so both call this
+// instead of duplicating the read loop.
+fn stream_stdout_as_progress(app: &AppHandle, bot_id: &str, stdout: tokio::process::ChildStdout) {
+    let app = app.clone();
+    let bot_id = bot_id.to_string();
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let _ = app.emit("training-progress", TrainingProgress { bot_id: bot_id.clone(), line });
+        }
+    });
+}
+
+// The resumable counterpart to a plain `docker run --rm`: named so a later
+// call — a page refresh, or this whole app being closed and reopened —
+// can find the same container instead of blindly starting a second one.
+// Checks its state first: already succeeded means skip entirely (the step
+// is done, nothing to do); still running means attach to its live output
+// instead of starting a competing one; previously failed means clear it
+// and start clean, since there's nothing useful to "resume" out of a
+// failure. This is what makes train_local_model as a whole idempotent —
+// calling it again for the same bot never redoes finished work.
+async fn run_freqtrade_step_resumable(
+    app: &AppHandle,
+    bot_id: &str,
+    work_dir: &Path,
+    container_name: &str,
+    args: &[&str],
+) -> Result<(), String> {
+    match inspect_container(container_name).await {
+        ContainerState::ExitedOk => {
+            emit_status(app, bot_id, format!("=== {container_name}: already completed in a previous run, skipping ==="));
+            return Ok(());
+        }
+        ContainerState::Running => {
+            emit_status(app, bot_id, format!("=== {container_name}: already running, reattaching to it ==="));
+            return follow_and_wait(app, bot_id, container_name).await;
+        }
+        ContainerState::ExitedError => remove_container(container_name).await,
+        ContainerState::Missing => {}
+    }
+
     let mut docker_args = vec![
         "run".to_string(),
-        "--rm".to_string(),
+        "--name".to_string(),
+        container_name.to_string(),
         "-v".to_string(),
         format!("{}:/freqtrade/user_data", work_dir.join("user_data").display()),
         FREQTRADE_DOCKER_IMAGE.to_string(),
@@ -601,22 +788,45 @@ async fn run_freqtrade_step(app: &AppHandle, bot_id: &str, work_dir: &Path, args
         .map_err(|e| format!("could not spawn docker (is Docker Desktop running?): {e}"))?;
 
     if let Some(stdout) = child.stdout.take() {
-        let app = app.clone();
-        let bot_id = bot_id.to_string();
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                let _ = app.emit(
-                    "training-progress",
-                    TrainingProgress { bot_id: bot_id.clone(), line },
-                );
-            }
-        });
+        stream_stdout_as_progress(app, bot_id, stdout);
     }
 
     let status = child.wait().await.map_err(|e| format!("docker process error: {e}"))?;
     if !status.success() {
         return Err(format!("docker exited with status {status}"));
+    }
+    Ok(())
+}
+
+// Reattaches to a container this same function started on a previous
+// invocation and that's still going: `docker logs -f` streams its output
+// (from the beginning, same as a fresh run would show) and returns once
+// the container stops producing output; `docker wait` then blocks (a
+// no-op if it's already stopped) until it actually exits and hands back
+// its real exit code, which is what a fresh run's own child.wait() above
+// would have given us directly.
+async fn follow_and_wait(app: &AppHandle, bot_id: &str, container_name: &str) -> Result<(), String> {
+    let mut logs_cmd = Command::new("docker");
+    logs_cmd
+        .args(["logs", "-f", container_name])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    hide_console_window(&mut logs_cmd);
+    let mut logs_child = logs_cmd
+        .spawn()
+        .map_err(|e| format!("could not attach to the already-running container: {e}"))?;
+    if let Some(stdout) = logs_child.stdout.take() {
+        stream_stdout_as_progress(app, bot_id, stdout);
+    }
+    let _ = logs_child.wait().await;
+
+    let mut wait_cmd = Command::new("docker");
+    wait_cmd.args(["wait", container_name]).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
+    hide_console_window(&mut wait_cmd);
+    let output = wait_cmd.output().await.map_err(|e| format!("could not wait for container to finish: {e}"))?;
+    let exit_code: i32 = String::from_utf8_lossy(&output.stdout).trim().parse().unwrap_or(-1);
+    if exit_code != 0 {
+        return Err(format!("docker exited with status {exit_code}"));
     }
     Ok(())
 }
@@ -702,7 +912,7 @@ fn main() {
             tauri::async_runtime::spawn(check_for_update(app.handle().clone()));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![train_local_model])
+        .invoke_handler(tauri::generate_handler![train_local_model, local_training_status])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
