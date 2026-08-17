@@ -110,7 +110,17 @@ async fn train_local_model(
     const DATA_SOURCE_EXCHANGES: [&str; 2] = [DATA_SOURCE_EXCHANGE, DATA_SOURCE_EXCHANGE_FALLBACK];
     let _ = &exchange_name;
 
-    let (pair_whitelist_value, pairlists_value, download_data_pairs) = if auto_select_coins {
+    // static_download_pairs is Some(...) only for manual mode, where the
+    // pairs to download are already a concrete list and don't depend on
+    // which data source ends up succeeding. Auto-select mode instead
+    // resolves a concrete list fresh per data-source attempt inside the
+    // retry loop below, via resolve_auto_select_pairs — see that
+    // function's own doc comment for why pair_whitelist_value staying a
+    // ".*/USDT" wildcard here is fine (it's what freqtrade's VolumePairList
+    // itself needs to expand against, for ongoing trade-time re-ranking)
+    // even though the actual `download-data --pairs` argument must never
+    // be that wildcard.
+    let (pair_whitelist_value, pairlists_value, static_download_pairs) = if auto_select_coins {
         (
             serde_json::json!([".*/USDT"]),
             serde_json::json!([{
@@ -120,7 +130,7 @@ async fn train_local_model(
                 "min_value": 0,
                 "refresh_period": 1800,
             }]),
-            vec![".*/USDT".to_string(), CORR_PAIR.to_string()],
+            None,
         )
     } else {
         let pairs: Vec<String> = pair_whitelist
@@ -148,7 +158,7 @@ async fn train_local_model(
         (
             serde_json::json!(pairs),
             serde_json::json!([{ "method": "StaticPairList" }]),
-            download_pairs,
+            Some(download_pairs),
         )
     };
 
@@ -192,18 +202,40 @@ async fn train_local_model(
     let mut download_ok = false;
     let mut last_download_err = String::new();
     for data_source in DATA_SOURCE_EXCHANGES {
-        let _ = app.emit(
-            "training-progress",
-            TrainingProgress {
-                bot_id: bot_id.clone(),
-                line: format!("=== download-data: trying data source '{data_source}' ==="),
-            },
-        );
+        emit_status(&app, &bot_id, format!("=== download-data: trying data source '{data_source}' ==="));
         let mut source_config = config.clone();
         source_config["exchange"]["name"] = serde_json::json!(data_source);
         let source_config_json = serde_json::to_vec_pretty(&source_config).map_err(|e| e.to_string())?;
         std::fs::write(user_data_dir.join("config.json"), source_config_json)
             .map_err(|e| format!("could not write config.json: {e}"))?;
+
+        // Resolve the CONCRETE list of pairs to download. static_download_pairs
+        // (manual mode) never depends on the data source; auto-select mode
+        // resolves fresh per attempt via test-pairlist, since the whole
+        // point is downloading exactly what VolumePairList would currently
+        // rank top-N on *this* data source — never the ".*/USDT" wildcard
+        // that config's own pair_whitelist uses for its own, separate
+        // trade-time re-ranking (see resolve_auto_select_pairs).
+        let download_data_pairs = match &static_download_pairs {
+            Some(pairs) => pairs.clone(),
+            None => match resolve_auto_select_pairs(&app, &bot_id, &work_dir, CORR_PAIR).await {
+                Ok(pairs) => pairs,
+                Err(e) => {
+                    last_download_err = format!("could not resolve top-{clamped_pair_count} pairlist via test-pairlist: {e}");
+                    continue;
+                }
+            },
+        };
+        emit_status(
+            &app,
+            &bot_id,
+            format!(
+                "=== about to download {} pairs (requested top {}): {} ===",
+                download_data_pairs.len(),
+                clamped_pair_count,
+                download_data_pairs.join(", "),
+            ),
+        );
 
         let mut download_data_args: Vec<&str> =
             vec!["download-data", "--config", "user_data/config.json", "--timeframes", "5m", "--pairs"];
@@ -487,6 +519,65 @@ fn launch_downloaded_installer(path: &Path) -> Result<(), String> {
         let _ = path;
         Err("automatic Docker installation is only supported on Windows and macOS".into())
     }
+}
+
+// Auto-select's config.json carries a ".*/USDT" wildcard as pair_whitelist
+// with a VolumePairList pairlists entry — freqtrade expands that live at
+// trade/backtest time against whatever's currently top-N by volume, which
+// is exactly the dynamic re-ranking auto-select is for. But `download-data
+// --pairs .*/USDT` interprets that same wildcard as a *regex*, matching
+// every USDT market the exchange lists — not the N the user actually
+// chose. This resolves the wildcard to the same concrete list freqtrade's
+// own VolumePairList would currently pick, via freqtrade's own
+// `test-pairlist --print-json` (queries the exchange for live volume data,
+// prints exactly the resolved pairs and nothing else to stdout — its own
+// INFO/WARNING logging goes to stderr), the same mechanism this codebase's
+// now-removed permanent data-server refresh script used for the identical
+// problem. BTC/USDT is unioned in for downloading purposes only — every
+// FreqAI preset needs it for correlation features (include_corr_pairlist)
+// even on a run where it wouldn't otherwise rank in the top pairs by
+// volume — this never adds it to the bot's actual trading whitelist,
+// which stays whatever VolumePairList itself resolves at trade time.
+async fn resolve_auto_select_pairs(
+    app: &AppHandle,
+    bot_id: &str,
+    work_dir: &Path,
+    corr_pair: &str,
+) -> Result<Vec<String>, String> {
+    emit_status(app, bot_id, "=== resolving the current top-N pairlist by volume (test-pairlist) ===");
+
+    let mut cmd = Command::new("docker");
+    cmd.args([
+        "run",
+        "--rm",
+        "-v",
+        &format!("{}:/freqtrade/user_data", work_dir.join("user_data").display()),
+        FREQTRADE_DOCKER_IMAGE,
+        "test-pairlist",
+        "--config",
+        "user_data/config.json",
+        "--print-json",
+    ])
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped());
+    hide_console_window(&mut cmd);
+
+    let output = cmd.output().await.map_err(|e| format!("could not spawn docker: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("test-pairlist exited with {}: {}", output.status, stderr.trim()));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut pairs: Vec<String> = serde_json::from_str(stdout.trim())
+        .map_err(|e| format!("could not parse test-pairlist output as JSON ({e}): {}", stdout.trim()))?;
+    if pairs.is_empty() {
+        return Err("test-pairlist resolved an empty pairlist".into());
+    }
+    if !pairs.iter().any(|p| p == corr_pair) {
+        pairs.push(corr_pair.to_string());
+    }
+    Ok(pairs)
 }
 
 async fn run_freqtrade_step(app: &AppHandle, bot_id: &str, work_dir: &Path, args: &[&str]) -> Result<(), String> {
