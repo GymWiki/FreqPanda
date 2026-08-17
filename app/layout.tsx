@@ -17,7 +17,7 @@ const monoFont = IBM_Plex_Mono({ subsets: ["latin"], weight: ["400", "500"], var
 // place to update when the domain changes.
 export const metadata: Metadata = {
   metadataBase: new URL(process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000"),
-  title: "Freqtrade Command Center",
+  title: "FreqPanda",
   description: "Train FreqAI models locally for free. Deploy your bots to the cloud in one click.",
 };
 
