@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use chrono::{Duration, Utc};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -100,6 +101,25 @@ async fn train_local_model(
     // required property". BTC/USDT is the fixed platform-wide default.
     const CORR_PAIR: &str = "BTC/USDT";
 
+    // FreqAI backtesting (which is what actually trains a model — see the
+    // module doc above) refuses to start without an explicit --timerange:
+    // "Please pass --timerange if you intend to use FreqAI for
+    // backtesting." The window has to be wide enough to fit several full
+    // train+backtest cycles or FreqAI has nothing meaningful to slide
+    // across — same 90-day floor / 4x-of-(train+backtest) multiplier this
+    // project already used for cloud training before local training
+    // replaced it (see buildFreqAITrainingCloudInit's git history in
+    // lib/hetzner.ts). Also drives download-data below with the exact same
+    // range, so the candles on disk always cover what backtesting asks for
+    // — never narrower (which FreqAI would reject) or pointlessly wider.
+    const FREQAI_TRAIN_PERIOD_DAYS: i64 = 30;
+    const FREQAI_BACKTEST_PERIOD_DAYS: i64 = 7;
+    let timerange_days = ((FREQAI_TRAIN_PERIOD_DAYS + FREQAI_BACKTEST_PERIOD_DAYS) * 4).max(90);
+    let today = Utc::now().date_naive();
+    let start_date = today - Duration::days(timerange_days);
+    let fmt_date = |d: chrono::NaiveDate| d.format("%Y%m%d").to_string();
+    let timerange = format!("{}-{}", fmt_date(start_date), fmt_date(today));
+
     // The exchange(s) local training actually pulls candles from —
     // deliberately NOT `exchange_name` (the bot's own real trading
     // exchange, still accepted here for API compatibility with the
@@ -191,8 +211,8 @@ async fn train_local_model(
         "freqai": {
             "enabled": true,
             "identifier": format!("{bot_id}-model"),
-            "train_period_days": 30,
-            "backtest_period_days": 7,
+            "train_period_days": FREQAI_TRAIN_PERIOD_DAYS,
+            "backtest_period_days": FREQAI_BACKTEST_PERIOD_DAYS,
             "feature_parameters": { "include_timeframes": ["5m"], "include_corr_pairlist": [CORR_PAIR] },
             "data_split_parameters": { "test_size": 0.25 }
         }
@@ -247,8 +267,16 @@ async fn train_local_model(
             ),
         );
 
-        let mut download_data_args: Vec<&str> =
-            vec!["download-data", "--config", "user_data/config.json", "--timeframes", "5m", "--pairs"];
+        let mut download_data_args: Vec<&str> = vec![
+            "download-data",
+            "--config",
+            "user_data/config.json",
+            "--timeframes",
+            "5m",
+            "--timerange",
+            &timerange,
+            "--pairs",
+        ];
         download_data_args.extend(download_data_pairs.iter().map(|p| p.as_str()));
         match run_freqtrade_step_resumable(&app, &bot_id, &work_dir, &download_container, &download_data_args).await {
             Ok(()) => {
@@ -278,6 +306,8 @@ async fn train_local_model(
             &strategy,
             "--freqaimodel",
             "LightGBMRegressor",
+            "--timerange",
+            &timerange,
         ],
     )
     .await?;

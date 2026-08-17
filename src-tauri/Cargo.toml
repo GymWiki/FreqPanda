@@ -1,6 +1,6 @@
 [package]
 name = "freqtrade-command-center"
-version = "0.1.12"
+version = "0.1.13"
 description = "Freqtrade Command Center desktop app — local FreqAI training shell around the web dashboard"
 edition = "2021"
 rust-version = "1.77"
@@ -21,6 +21,10 @@ tokio = { version = "1", features = ["process", "io-util", "fs", "rt-multi-threa
 # rustls-tls to match the pure-Rust TLS stack tauri-plugin-updater already
 # pulls in, no system OpenSSL dependency needed on either platform.
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+# Only used to compute the --timerange passed to download-data/backtesting
+# (see train_local_model in src/main.rs) — already an existing transitive
+# dependency (pulled in by tauri-plugin-updater), promoted to direct here.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [profile.release]
 panic = "abort"
