@@ -220,11 +220,27 @@ async fn train_local_model(
         remove_container(&download_container).await;
     }
 
+    // entry_pricing/exit_pricing and max_open_trades are both required by
+    // freqtrade but have no schema-level default it could silently fill in
+    // for a missing key — omitting either is a bare crash, not a graceful
+    // validation error (entry_pricing/exit_pricing: freqtrade's own
+    // Exchange.validate_config, in freqtrade/exchange/exchange.py, does a
+    // raw `config["exit_pricing"]`/`config["entry_pricing"]` dict subscript
+    // unconditionally in its own __init__, so a missing key surfaces as a
+    // raw Python KeyError rather than a readable message). Must stay in
+    // sync with the identically-named/valued PRICE_DISCOVERY_CONFIG /
+    // DEFAULT_MAX_OPEN_TRADES in lib/hetzner.ts — that file's own doc
+    // comments there have the full citations. Checked on every call by
+    // validate_local_training_config below specifically so a future
+    // refactor of this config block can't silently drop one of these
+    // again — see that function's own doc comment for why it exists at
+    // all.
     let config = serde_json::json!({
         "stake_currency": "USDT",
         "stake_amount": "unlimited",
         "dry_run": true,
         "trading_mode": "spot",
+        "max_open_trades": 5,
         "exchange": {
             // Starting value only — rewritten before each download-data
             // attempt below, cycling through DATA_SOURCE_EXCHANGES if the
@@ -236,6 +252,8 @@ async fn train_local_model(
             "pair_blacklist": [],
         },
         "pairlists": pairlists_value,
+        "entry_pricing": { "price_side": "same", "use_order_book": true, "order_book_top": 1 },
+        "exit_pricing": { "price_side": "same", "use_order_book": true, "order_book_top": 1 },
         "freqai": {
             "enabled": true,
             "identifier": format!("{bot_id}-model"),
@@ -245,6 +263,7 @@ async fn train_local_model(
             "data_split_parameters": { "test_size": 0.25 }
         }
     });
+    validate_local_training_config(&config)?;
 
     // "--timeframes" (plural) is the only flag download-data actually
     // accepts — freqtrade's own ARGS_DOWNLOAD_DATA has no singular
@@ -395,6 +414,130 @@ async fn train_local_model(
 // test-pairlist stays a plain `--rm` run, it's fast and stateless.
 fn training_container_name(bot_id: &str, step: &str) -> String {
     format!("freqpanda-train-{bot_id}-{step}")
+}
+
+// This app now generates a freqtrade config.json from two independent
+// places — this file (Rust, for local Tauri training) and lib/hetzner.ts
+// (TypeScript, for VPS deploy) — because the two run in genuinely
+// different languages/processes; there's no way to share one literal
+// generator between them. That split is exactly how a required key has
+// already silently gone missing from just one side once before:
+// entry_pricing/exit_pricing (and separately, max_open_trades) were added
+// to lib/hetzner.ts's config generation after freqtrade backtesting
+// crashed with `KeyError: 'exit_pricing'`, but that fix was never ported
+// over here — this file's own config never had them — so the exact same
+// crash resurfaced the moment local training's config actually reached
+// backtesting (the --timerange fix upstream of this one meant backtesting
+// finally started running instead of erroring out earlier). Since the two
+// generators can't be merged, this function is the structural guard
+// instead: called on every config this file builds, right after building
+// it, so a future edit to the config block above that drops one of these
+// again fails loudly and immediately — a clear Rust-level error before
+// Docker is ever spawned — rather than as a cryptic Python KeyError deep
+// in a container's logs. Keep this list in sync with whatever
+// lib/hetzner.ts's own required-field comments (PRICE_DISCOVERY_CONFIG,
+// DEFAULT_MAX_OPEN_TRADES, and the freqai schema comment near
+// include_corr_pairlist) document as required there.
+fn validate_local_training_config(config: &serde_json::Value) -> Result<(), String> {
+    const REQUIRED_TOP_LEVEL_KEYS: &[&str] = &[
+        "stake_currency",
+        "stake_amount",
+        "dry_run",
+        "trading_mode",
+        "max_open_trades",
+        "exchange",
+        "pairlists",
+        "entry_pricing",
+        "exit_pricing",
+        "freqai",
+    ];
+    for key in REQUIRED_TOP_LEVEL_KEYS {
+        if config.get(key).is_none() {
+            return Err(format!(
+                "generated config.json is missing required key '{key}' — this is a bug in train_local_model's config generation, not a Docker/network problem"
+            ));
+        }
+    }
+    for pricing_key in ["entry_pricing", "exit_pricing"] {
+        let price_side_present = config
+            .get(pricing_key)
+            .and_then(|v| v.get("price_side"))
+            .is_some();
+        if !price_side_present {
+            return Err(format!("generated config.json's '{pricing_key}' is missing 'price_side'"));
+        }
+    }
+    let has_corr_pairlist = config
+        .get("freqai")
+        .and_then(|f| f.get("feature_parameters"))
+        .and_then(|f| f.get("include_corr_pairlist"))
+        .is_some();
+    if !has_corr_pairlist {
+        return Err("generated config.json is missing freqai.feature_parameters.include_corr_pairlist".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod local_training_config_tests {
+    use super::validate_local_training_config;
+
+    fn valid_config() -> serde_json::Value {
+        serde_json::json!({
+            "stake_currency": "USDT",
+            "stake_amount": "unlimited",
+            "dry_run": true,
+            "trading_mode": "spot",
+            "max_open_trades": 5,
+            "exchange": { "name": "okx", "pair_whitelist": [], "pair_blacklist": [] },
+            "pairlists": [{ "method": "StaticPairList" }],
+            "entry_pricing": { "price_side": "same", "use_order_book": true, "order_book_top": 1 },
+            "exit_pricing": { "price_side": "same", "use_order_book": true, "order_book_top": 1 },
+            "freqai": {
+                "enabled": true,
+                "feature_parameters": { "include_timeframes": ["5m"], "include_corr_pairlist": ["BTC/USDT"] },
+            },
+        })
+    }
+
+    #[test]
+    fn accepts_a_complete_config() {
+        assert!(validate_local_training_config(&valid_config()).is_ok());
+    }
+
+    #[test]
+    fn rejects_a_config_missing_exit_pricing() {
+        // Regression coverage for the actual bug this validator exists to
+        // catch: freqtrade's Exchange.validate_config crashes with a raw
+        // KeyError on a missing exit_pricing (see this function's own doc
+        // comment) — this must never reach `docker run` again.
+        let mut config = valid_config();
+        config.as_object_mut().unwrap().remove("exit_pricing");
+        let err = validate_local_training_config(&config).unwrap_err();
+        assert!(err.contains("exit_pricing"), "error should name the missing key, got: {err}");
+    }
+
+    #[test]
+    fn rejects_a_config_missing_entry_pricing() {
+        let mut config = valid_config();
+        config.as_object_mut().unwrap().remove("entry_pricing");
+        assert!(validate_local_training_config(&config).is_err());
+    }
+
+    #[test]
+    fn rejects_a_config_missing_max_open_trades() {
+        let mut config = valid_config();
+        config.as_object_mut().unwrap().remove("max_open_trades");
+        assert!(validate_local_training_config(&config).is_err());
+    }
+
+    #[test]
+    fn rejects_a_config_missing_include_corr_pairlist() {
+        let mut config = valid_config();
+        config["freqai"]["feature_parameters"].as_object_mut().unwrap().remove("include_corr_pairlist");
+        let err = validate_local_training_config(&config).unwrap_err();
+        assert!(err.contains("include_corr_pairlist"), "error should name the missing key, got: {err}");
+    }
 }
 
 // pairs must be a concrete list here, never the ".*/USDT" wildcard — see

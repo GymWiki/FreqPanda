@@ -550,6 +550,14 @@ function buildPairlistConfig(autoSelectCoins: boolean, pairWhitelist: string[], 
   };
 }
 
+// This value, and DEFAULT_MAX_OPEN_TRADES right below, must stay in sync
+// with the identically-valued fields in src-tauri/src/main.rs's own
+// config.json generation for local training — that file builds its config
+// independently (Rust, a different process entirely) and once already
+// went stale on exactly these two required keys after a fix landed only
+// here; see validate_local_training_config in that file for the guard
+// added to stop that from happening silently again.
+//
 // Every config.json this app generates needs entry_pricing/exit_pricing:
 // freqtrade's Exchange.validate_config (freqtrade/exchange/exchange.py)
 // does a raw `config["exit_pricing"]` / `config["entry_pricing"]` dict
