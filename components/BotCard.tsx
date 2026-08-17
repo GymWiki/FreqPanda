@@ -47,6 +47,12 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
   const [isUploading, setIsUploading] = useState(false);
   const [isDeploying, setIsDeploying] = useState(false);
   const [isTrainingLocally, setIsTrainingLocally] = useState(false);
+  // Rust's train_local_model emits "training-progress" events (Docker
+  // starting up, installer downloading, download-data/backtesting output)
+  // — surfaced here so a multi-step, sometimes minutes-long flow (Docker
+  // Desktop's own startup can take up to a minute) doesn't just look like a
+  // frozen spinner. Not persisted anywhere, just the latest line.
+  const [trainingStatus, setTrainingStatus] = useState<string | null>(null);
   const [isRevealingCredentials, setIsRevealingCredentials] = useState(false);
   const [apiCredentials, setApiCredentials] = useState<{ username: string; password: string } | null>(null);
   const [copiedField, setCopiedField] = useState<"username" | "password" | null>(null);
@@ -173,11 +179,24 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
   // tab or the Tauri webview.
   async function handleStartLocalTraining() {
     setError(null);
+    setTrainingStatus(null);
     setIsTrainingLocally(true);
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const { readFile } = await import("@tauri-apps/plugin-fs");
 
+    const { invoke } = await import("@tauri-apps/api/core");
+    const { readFile } = await import("@tauri-apps/plugin-fs");
+    const { listen } = await import("@tauri-apps/api/event");
+
+    // Rust emits one of these per bot per step (Docker starting up,
+    // installer downloading, download-data/backtesting output) — this app
+    // can have multiple BotCards training in parallel, so filter to this
+    // card's own bot rather than showing another bot's progress here.
+    const unlisten = await listen<{ botId: string; line: string }>("training-progress", (event) => {
+      if (event.payload.botId === bot.id) {
+        setTrainingStatus(event.payload.line);
+      }
+    });
+
+    try {
       const modelPath = await invoke<string>("train_local_model", {
         botId: bot.id,
         strategy: bot.strategy,
@@ -198,7 +217,9 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
     } catch (err) {
       setError(toErrorMessage(err, dict.botCard.localTrainingFailed));
     } finally {
+      unlisten();
       setIsTrainingLocally(false);
+      setTrainingStatus(null);
     }
   }
 
@@ -495,15 +516,22 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
 
       <div className="space-y-2 rounded-lg border border-border p-3">
         {isTauri() ? (
-          <button
-            type="button"
-            onClick={handleStartLocalTraining}
-            disabled={isTrainingLocally}
-            className="flex w-full items-center justify-center gap-2 rounded-lg border border-primary/40 px-3 py-2 text-xs font-medium text-primary transition hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {isTrainingLocally ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Laptop className="h-3.5 w-3.5" />}
-            {isTrainingLocally ? dict.botCard.trainingLocally : dict.botCard.startLocalTraining}
-          </button>
+          <>
+            <button
+              type="button"
+              onClick={handleStartLocalTraining}
+              disabled={isTrainingLocally}
+              className="flex w-full items-center justify-center gap-2 rounded-lg border border-primary/40 px-3 py-2 text-xs font-medium text-primary transition hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {isTrainingLocally ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Laptop className="h-3.5 w-3.5" />}
+              {isTrainingLocally ? dict.botCard.trainingLocally : dict.botCard.startLocalTraining}
+            </button>
+            {isTrainingLocally && trainingStatus && (
+              <p className="truncate text-center text-[11px] text-slate-500" title={trainingStatus}>
+                {trainingStatus.replace(/^=== | ===$/g, "")}
+              </p>
+            )}
+          </>
         ) : (
           <p className="rounded-lg bg-background px-3 py-2 text-[11px] text-slate-500">
             {dict.botCard.localTrainingNeedsApp}

@@ -7,7 +7,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_updater::UpdaterExt;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
 #[derive(Clone, Serialize)]
@@ -55,11 +55,13 @@ async fn train_local_model(
     }
 
     // Both the download-data loop below and the backtesting step after it
-    // shell out to `docker run`. Check up front and fail with one
-    // unambiguous message instead of letting a missing/stopped Docker
-    // surface as a confusing "historical data download failed against
-    // every data source" error after the exchange retry loop already ran.
-    check_docker_available().await?;
+    // shell out to `docker run`. Get Docker into a ready state up front —
+    // starting it automatically if it's already installed, or fetching and
+    // opening the official installer if it isn't — instead of letting a
+    // missing/stopped Docker surface as a confusing "historical data
+    // download failed against every data source" error after the exchange
+    // retry loop already ran. The user should only ever have to click Train.
+    ensure_docker_ready(&app, &bot_id).await?;
 
     let work_dir = app
         .path()
@@ -258,12 +260,18 @@ fn is_safe_python_identifier(value: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-// `docker run` itself (in run_freqtrade_step) can't tell these two failure
-// modes apart from its own io::Error alone in a way that's worth surfacing
-// differently, but `docker info` can: NotFound means the binary isn't on
-// PATH at all (Docker was never installed), anything else means it's
-// installed but the daemon isn't answering (Docker Desktop isn't running).
-async fn check_docker_available() -> Result<(), String> {
+enum DockerState {
+    Ready,
+    NotRunning,
+    NotInstalled,
+}
+
+// `docker run` itself (in run_freqtrade_step) can't tell these apart from
+// its own io::Error alone in a way that's worth surfacing differently, but
+// `docker info` can: NotFound means the binary isn't on PATH at all (Docker
+// was never installed), anything else means it's installed but the daemon
+// isn't answering (Docker Desktop isn't running).
+async fn docker_state() -> DockerState {
     match Command::new("docker")
         .arg("info")
         .stdout(std::process::Stdio::null())
@@ -271,14 +279,188 @@ async fn check_docker_available() -> Result<(), String> {
         .status()
         .await
     {
-        Ok(status) if status.success() => Ok(()),
-        Ok(_) => Err(
-            "Docker is installed but not running. Start Docker Desktop, then try training again.".into(),
-        ),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(
-            "Docker was not found. Install Docker Desktop (https://www.docker.com/products/docker-desktop/) and start it before training locally.".into(),
-        ),
-        Err(e) => Err(format!("could not check Docker status: {e}")),
+        Ok(status) if status.success() => DockerState::Ready,
+        Ok(_) => DockerState::NotRunning,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => DockerState::NotInstalled,
+        // Some other spawn-level failure (permissions, etc.) — treat like
+        // "not running" rather than misreporting Docker as never installed.
+        Err(_) => DockerState::NotRunning,
+    }
+}
+
+fn emit_status(app: &AppHandle, bot_id: &str, line: impl Into<String>) {
+    let _ = app.emit(
+        "training-progress",
+        TrainingProgress { bot_id: bot_id.to_string(), line: line.into() },
+    );
+}
+
+// The whole point of this function is that the user only ever has to click
+// Train: if Docker is already installed but just isn't running, start it
+// ourselves; if it isn't installed at all, fetch and open the official
+// installer for them instead of sending them off to go find it. Either way
+// this either returns Ok (Docker is ready, the caller can proceed) or an
+// Err with a message explaining exactly what the user still needs to do —
+// starting Docker Desktop or finishing its installer isn't something this
+// app can script past; those are the vendor's own first-run/UAC/Gatekeeper
+// prompts, not something we control.
+async fn ensure_docker_ready(app: &AppHandle, bot_id: &str) -> Result<(), String> {
+    match docker_state().await {
+        DockerState::Ready => Ok(()),
+        DockerState::NotRunning => {
+            emit_status(app, bot_id, "=== Docker is installed but not running — starting it automatically ===");
+            if let Err(e) = launch_installed_docker_desktop() {
+                return Err(format!(
+                    "Docker is installed but not running, and could not be started automatically ({e}). Start Docker Desktop yourself, then try training again."
+                ));
+            }
+            emit_status(app, bot_id, "=== waiting for Docker Desktop to finish starting (this can take up to a minute) ===");
+            if wait_for_docker(app, bot_id).await {
+                Ok(())
+            } else {
+                Err("Docker Desktop was started but did not become ready in time. Wait for it to finish starting, then try training again.".into())
+            }
+        }
+        DockerState::NotInstalled => {
+            let url = docker_installer_url()?;
+            let dest = std::env::temp_dir().join(docker_installer_filename());
+            emit_status(app, bot_id, "=== Docker was not found — downloading the official installer ===");
+            download_docker_installer(app, bot_id, url, &dest).await?;
+            emit_status(app, bot_id, "=== opening the Docker Desktop installer ===");
+            launch_downloaded_installer(&dest)?;
+            Err("The Docker Desktop installer has been opened. Finish the installation (and start Docker Desktop once, the first time), then click Train again.".into())
+        }
+    }
+}
+
+// Docker Desktop's own startup (spinning up its VM backend) routinely takes
+// 20-60s, so a single check right after asking the OS to launch it would
+// almost always still see NotRunning — poll instead, with periodic status
+// so the wait doesn't look frozen to the user.
+async fn wait_for_docker(app: &AppHandle, bot_id: &str) -> bool {
+    const MAX_ATTEMPTS: u32 = 45; // ~90s at 2s intervals
+    for attempt in 0..MAX_ATTEMPTS {
+        if matches!(docker_state().await, DockerState::Ready) {
+            return true;
+        }
+        if attempt > 0 && attempt % 5 == 0 {
+            emit_status(app, bot_id, "=== still waiting for Docker Desktop to start... ===");
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+    false
+}
+
+// Docker Desktop's GUI app is a separate executable from the `docker` CLI
+// on PATH, so having the CLI missing/unresponsive doesn't tell us where the
+// GUI lives — these are the one place each platform's installer always
+// puts it.
+fn launch_installed_docker_desktop() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let program_files = std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string());
+        let exe = format!("{program_files}\\Docker\\Docker\\Docker Desktop.exe");
+        if !std::path::Path::new(&exe).exists() {
+            return Err("Docker Desktop.exe was not found at the expected install path".into());
+        }
+        return Command::new(exe).spawn().map(|_| ()).map_err(|e| e.to_string());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return Command::new("open").args(["-a", "Docker"]).spawn().map(|_| ()).map_err(|e| e.to_string());
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        Err("automatic Docker Desktop management is only supported on Windows and macOS".into())
+    }
+}
+
+// Official, stable download URLs — same ones desktop.docker.com's own
+// download buttons point at, just fetched directly instead of sending the
+// user to go find them.
+fn docker_installer_url() -> Result<&'static str, String> {
+    #[cfg(target_os = "windows")]
+    {
+        return Ok("https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return Ok(if cfg!(target_arch = "aarch64") {
+            "https://desktop.docker.com/mac/main/arm64/Docker.dmg"
+        } else {
+            "https://desktop.docker.com/mac/main/amd64/Docker.dmg"
+        });
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        Err("automatic Docker installation is only supported on Windows and macOS".into())
+    }
+}
+
+fn docker_installer_filename() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        return "DockerDesktopInstaller.exe";
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return "DockerDesktop.dmg";
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        "docker-installer"
+    }
+}
+
+async fn download_docker_installer(
+    app: &AppHandle,
+    bot_id: &str,
+    url: &str,
+    dest: &Path,
+) -> Result<(), String> {
+    let mut resp = reqwest::get(url).await.map_err(|e| format!("could not reach {url}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("installer download failed with status {}", resp.status()));
+    }
+    let total = resp.content_length();
+    let mut file = tokio::fs::File::create(dest)
+        .await
+        .map_err(|e| format!("could not create {}: {e}", dest.display()))?;
+
+    let mut downloaded: u64 = 0;
+    let mut last_reported_pct: u64 = 0;
+    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+        file.write_all(&chunk).await.map_err(|e| e.to_string())?;
+        downloaded += chunk.len() as u64;
+        if let Some(total) = total {
+            let pct = downloaded.saturating_mul(100) / total.max(1);
+            if pct >= last_reported_pct + 10 {
+                last_reported_pct = pct;
+                emit_status(app, bot_id, format!("=== downloading Docker Desktop installer: {pct}% ==="));
+            }
+        }
+    }
+    Ok(())
+}
+
+// Windows: the installer .exe runs directly and shows its own wizard
+// (requesting UAC elevation itself — an OS security prompt this app can't
+// and shouldn't try to suppress). macOS: `open` on a .dmg mounts it and
+// shows Finder's normal drag-Docker.app-to-Applications prompt, the
+// standard flow for any Mac app distributed this way.
+fn launch_downloaded_installer(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        return Command::new(path).spawn().map(|_| ()).map_err(|e| e.to_string());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return Command::new("open").arg(path).spawn().map(|_| ()).map_err(|e| e.to_string());
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = path;
+        Err("automatic Docker installation is only supported on Windows and macOS".into())
     }
 }
 

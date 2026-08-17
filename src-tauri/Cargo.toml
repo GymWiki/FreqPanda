@@ -1,6 +1,6 @@
 [package]
 name = "freqtrade-command-center"
-version = "0.1.7"
+version = "0.1.8"
 description = "Freqtrade Command Center desktop app — local FreqAI training shell around the web dashboard"
 edition = "2021"
 rust-version = "1.77"
@@ -15,7 +15,12 @@ tauri-plugin-updater = "2"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["process", "io-util", "rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["process", "io-util", "fs", "rt-multi-thread", "macros"] }
+# Only used to fetch the official Docker Desktop installer when Docker isn't
+# found on the user's machine (see ensure_docker_ready in src/main.rs) —
+# rustls-tls to match the pure-Rust TLS stack tauri-plugin-updater already
+# pulls in, no system OpenSSL dependency needed on either platform.
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 
 [profile.release]
 panic = "abort"
