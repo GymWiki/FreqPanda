@@ -69,7 +69,7 @@ export const POST = withErrorHandling(async (req: NextRequest) => {
 
   const updated = await prisma.botConfiguration.update({
     where: { id: botId },
-    data: { aiModelPath: objectPath },
+    data: { aiModelPath: objectPath, aiModelUploadedAt: new Date() },
   });
 
   return NextResponse.json({ aiModelPath: updated.aiModelPath });

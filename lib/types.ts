@@ -50,6 +50,11 @@ export interface BotConfigurationDTO {
   autoCompound: boolean;
   deploymentStatus: DeploymentStatus;
   aiModelPath: string | null;
+  // Set whenever aiModelPath changes (see POST /api/upload) — null for a
+  // bot that has never had a model uploaded. Drives the "last trained" /
+  // retrain-recommended block on the bot detail page (see
+  // lib/retrain-advice.ts).
+  aiModelUploadedAt: string | Date | null;
   hetznerServerIp: string | null;
   apiServerUsername: string | null;
   status: BotStatus;

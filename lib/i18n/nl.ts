@@ -135,7 +135,7 @@ export const nl = {
     practiceModeNoticePrefix: "Deze bot start automatisch in ",
     practiceModeNoticeBold: "oefenmodus",
     practiceModeNoticeSuffix:
-      " — geen budget nodig, geen echt geld op het spel. Zodra je tevreden bent met de resultaten, schakel je over op echt geld vanaf de bot-kaart.",
+      " — geen budget nodig, geen echt geld op het spel. Zodra je tevreden bent met de resultaten, schakel je over op echt geld vanaf de bot-detailpagina.",
     submit: "Bot aanmaken (oefenmodus)",
   },
 
@@ -250,12 +250,28 @@ export const nl = {
     heading: "Totale winst (al je bots)",
   },
 
-  tradeHistory: {
-    loadFailed: "Kon geschiedenis niet laden",
-    heading: "Geschiedenis",
-    show: "tonen",
-    hide: "verbergen",
-    empty: "Nog geen trades — de bot heeft nog geen positie gesloten.",
+  botDetail: {
+    back: "Terug naar overzicht",
+    trainingStatusHeading: "Trainingsstatus",
+    neverTrained: "Nog nooit getraind",
+    trainedToday: "Laatst getraind: vandaag",
+    trainedDaysAgo: (days: number) => `Laatst getraind: ${days} ${days === 1 ? "dag" : "dagen"} geleden`,
+    retrainRecommended:
+      "Retraining aanbevolen — de marktdata waarop dit model getraind is, begint verouderd te raken.",
+    retrainNotNeeded: "Model is nog fris — retraining is nu niet nodig.",
+    tradesHeading: "Trades",
+    tradesLoadFailed: "Kon trades niet laden",
+    tradesEmptyNotDeployed: "De bot is nog niet gestart — trades verschijnen hier zodra hij actief is.",
+    tradesEmpty: "Nog geen trades — zodra de bot een positie sluit, verschijnt die hier.",
+    chartHeading: "Winst over tijd",
+    tableDate: "Datum",
+    tablePair: "Paar",
+    tableEntry: "Instapprijs",
+    tableExit: "Uitstapprijs",
+    tableResult: "Resultaat",
+    tableOpenPosition: "Nog open",
+    totalPlHeading: "Totale winst/verlies",
+    totalPlPaperNote: (amount: string) => `${amount} (Oefenmodus — fictief geld)`,
   },
 
   trainingProgress: {

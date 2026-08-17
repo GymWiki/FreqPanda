@@ -247,6 +247,12 @@ model BotConfiguration {
 
   deploymentStatus DeploymentStatus @default(LOCAL) @map("deployment_status")
   aiModelPath      String?          @map("ai_model_path")
+  // Set (and overwritten) every time aiModelPath changes — see
+  // POST /api/upload — so the bot detail page can show "last trained" and
+  // drive a simple retrain-recommended heuristic (see
+  // lib/retrain-advice.ts) off real data instead of updatedAt, which also
+  // changes on unrelated actions like toggling autoCompound.
+  aiModelUploadedAt DateTime? @map("ai_model_uploaded_at")
 
   hetznerServerId String? @map("hetzner_server_id")
   hetznerServerIp String? @map("hetzner_server_ip")

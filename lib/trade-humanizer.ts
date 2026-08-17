@@ -4,7 +4,11 @@ export interface HumanizedTrade {
   id: number;
   pair: string;
   isOpen: boolean;
+  openedAt: string;
   closedAt: string | null;
+  entryPrice: number;
+  /** null while a position is still open — there's no exit fill yet. */
+  exitPrice: number | null;
   profitAbs: number | null;
   profitRatio: number | null;
   /** null while a position is still open — there's no outcome to sign yet. */
@@ -94,7 +98,10 @@ export function humanizeTrade(trade: FreqtradeTrade): HumanizedTrade {
     id: trade.trade_id,
     pair: trade.pair,
     isOpen,
+    openedAt: trade.open_date,
     closedAt: trade.close_date,
+    entryPrice: trade.open_rate,
+    exitPrice: trade.close_rate,
     profitAbs,
     profitRatio,
     isWin,

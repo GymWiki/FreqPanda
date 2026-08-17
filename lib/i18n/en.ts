@@ -130,7 +130,7 @@ export const en: Dictionary = {
     autoSelectHint: "The bot keeps an eye on the most-traded coins and lets the AI trade wherever the opportunity looks best. Which exchange exactly, you choose later, when linking your account.",
     practiceModeNoticePrefix: "This bot starts automatically in ",
     practiceModeNoticeBold: "practice mode",
-    practiceModeNoticeSuffix: " — no budget needed, no real money at risk. Once you're happy with the results, switch to real money from the bot card.",
+    practiceModeNoticeSuffix: " — no budget needed, no real money at risk. Once you're happy with the results, switch to real money from the bot's detail page.",
     submit: "Create bot (practice mode)",
   },
 
@@ -243,12 +243,27 @@ export const en: Dictionary = {
     heading: "Total profit (all your bots)",
   },
 
-  tradeHistory: {
-    loadFailed: "Couldn't load history",
-    heading: "History",
-    show: "show",
-    hide: "hide",
-    empty: "No trades yet — the bot hasn't closed a position yet.",
+  botDetail: {
+    back: "Back to overview",
+    trainingStatusHeading: "Training status",
+    neverTrained: "Never trained yet",
+    trainedToday: "Last trained: today",
+    trainedDaysAgo: (days: number) => `Last trained: ${days} ${days === 1 ? "day" : "days"} ago`,
+    retrainRecommended: "Retraining recommended — the market data this model trained on is starting to age.",
+    retrainNotNeeded: "Model is still fresh — no need to retrain right now.",
+    tradesHeading: "Trades",
+    tradesLoadFailed: "Couldn't load trades",
+    tradesEmptyNotDeployed: "The bot hasn't started yet — trades will show up here once it's active.",
+    tradesEmpty: "No trades yet — once the bot closes a position, it'll show up here.",
+    chartHeading: "Profit over time",
+    tableDate: "Date",
+    tablePair: "Pair",
+    tableEntry: "Entry price",
+    tableExit: "Exit price",
+    tableResult: "Result",
+    tableOpenPosition: "Still open",
+    totalPlHeading: "Total profit/loss",
+    totalPlPaperNote: (amount: string) => `${amount} (Practice mode — fake money)`,
   },
 
   trainingProgress: {

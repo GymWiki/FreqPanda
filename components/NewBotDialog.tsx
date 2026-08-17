@@ -30,9 +30,9 @@ const EMPTY_FORM = {
 // No exchange choice here at all — training and paper trading run against
 // a fixed public data source (see DATA_SOURCE_EXCHANGE in lib/hetzner.ts),
 // decoupled from any exchange this bot might eventually connect to. The
-// exchange itself only gets picked later, on the bot's own card, at the
-// "Koppel exchange account" step (see ConnectExchangeDialog) — required
-// only once the user actually wants to go live.
+// exchange itself only gets picked later, on the bot's own detail page, at
+// the "Koppel exchange account" step (see ConnectExchangeDialog) —
+// required only once the user actually wants to go live.
 export function NewBotDialog({ onCreated }: NewBotDialogProps) {
   const dict = useDictionary();
   const [open, setOpen] = useState(false);

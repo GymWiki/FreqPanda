@@ -24,6 +24,7 @@ export const botSelect = {
   autoCompound: true,
   deploymentStatus: true,
   aiModelPath: true,
+  aiModelUploadedAt: true,
   hetznerServerIp: true,
   apiServerUsername: true,
   status: true,

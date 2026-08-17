@@ -35,16 +35,8 @@ export function BotFleetGrid({ initialBots }: BotFleetGridProps) {
     }
   }
 
-  function handleUpdate(updated: BotConfigurationDTO) {
-    setBots((prev) => prev.map((b) => (b.id === updated.id ? { ...b, ...updated } : b)));
-  }
-
   function handleCreated(bot: BotConfigurationDTO) {
     setBots((prev) => [bot, ...prev]);
-  }
-
-  function handleDelete(id: string) {
-    setBots((prev) => prev.filter((b) => b.id !== id));
   }
 
   return (
@@ -66,7 +58,7 @@ export function BotFleetGrid({ initialBots }: BotFleetGridProps) {
             // shape, a null field a component assumed was always set)
             // shouldn't take every other bot in the fleet down with it.
             <ErrorBoundary key={bot.id}>
-              <BotCard bot={bot} onUpdate={handleUpdate} onDelete={handleDelete} />
+              <BotCard bot={bot} />
             </ErrorBoundary>
           ))}
         </div>
