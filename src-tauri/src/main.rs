@@ -268,19 +268,38 @@ enum DockerState {
     NotInstalled,
 }
 
+// docker.exe (and every `docker run`/`docker info` child process) is a
+// Windows console-subsystem binary — spawning one from this GUI app
+// without CREATE_NO_WINDOW pops up a visible cmd.exe-style console window
+// on every invocation, even with stdout/stderr piped to null/captured:
+// piping output doesn't suppress the console window itself on Windows,
+// only CREATE_NO_WINDOW does. This app already streams that output into
+// its own UI (see run_freqtrade_step's training-progress events), so the
+// OS console window is never anything but confusing chrome. No-op on
+// macOS, which has no equivalent console-window concept — applied to
+// every Command in this file for consistency, including the two that
+// spawn GUI apps (Docker Desktop, its installer) where it's a harmless
+// no-op rather than a fix.
+#[cfg(target_os = "windows")]
+fn hide_console_window(cmd: &mut Command) {
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    cmd.creation_flags(CREATE_NO_WINDOW);
+}
+#[cfg(not(target_os = "windows"))]
+fn hide_console_window(_cmd: &mut Command) {}
+
 // `docker run` itself (in run_freqtrade_step) can't tell these apart from
 // its own io::Error alone in a way that's worth surfacing differently, but
 // `docker info` can: NotFound means the binary isn't on PATH at all (Docker
 // was never installed), anything else means it's installed but the daemon
 // isn't answering (Docker Desktop isn't running).
 async fn docker_state() -> DockerState {
-    match Command::new("docker")
-        .arg("info")
+    let mut cmd = Command::new("docker");
+    cmd.arg("info")
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await
-    {
+        .stderr(std::process::Stdio::null());
+    hide_console_window(&mut cmd);
+    match cmd.status().await {
         Ok(status) if status.success() => DockerState::Ready,
         Ok(_) => DockerState::NotRunning,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => DockerState::NotInstalled,
@@ -365,7 +384,9 @@ fn launch_installed_docker_desktop() -> Result<(), String> {
         if !std::path::Path::new(&exe).exists() {
             return Err("Docker Desktop.exe was not found at the expected install path".into());
         }
-        return Command::new(exe).spawn().map(|_| ()).map_err(|e| e.to_string());
+        let mut cmd = Command::new(exe);
+        hide_console_window(&mut cmd);
+        return cmd.spawn().map(|_| ()).map_err(|e| e.to_string());
     }
     #[cfg(target_os = "macos")]
     {
@@ -453,7 +474,9 @@ async fn download_docker_installer(
 fn launch_downloaded_installer(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        return Command::new(path).spawn().map(|_| ()).map_err(|e| e.to_string());
+        let mut cmd = Command::new(path);
+        hide_console_window(&mut cmd);
+        return cmd.spawn().map(|_| ()).map_err(|e| e.to_string());
     }
     #[cfg(target_os = "macos")]
     {
@@ -476,10 +499,13 @@ async fn run_freqtrade_step(app: &AppHandle, bot_id: &str, work_dir: &Path, args
     ];
     docker_args.extend(args.iter().map(|s| s.to_string()));
 
-    let mut child = Command::new("docker")
+    let mut docker_cmd = Command::new("docker");
+    docker_cmd
         .args(&docker_args)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    hide_console_window(&mut docker_cmd);
+    let mut child = docker_cmd
         .spawn()
         .map_err(|e| format!("could not spawn docker (is Docker Desktop running?): {e}"))?;
 
