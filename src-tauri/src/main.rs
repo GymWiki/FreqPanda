@@ -54,6 +54,13 @@ async fn train_local_model(
         return Err(format!("strategy must be a valid Python identifier (got: {strategy:?})"));
     }
 
+    // Both the download-data loop below and the backtesting step after it
+    // shell out to `docker run`. Check up front and fail with one
+    // unambiguous message instead of letting a missing/stopped Docker
+    // surface as a confusing "historical data download failed against
+    // every data source" error after the exchange retry loop already ran.
+    check_docker_available().await?;
+
     let work_dir = app
         .path()
         .app_local_data_dir()
@@ -249,6 +256,30 @@ fn is_safe_python_identifier(value: &str) -> bool {
         return false;
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+// `docker run` itself (in run_freqtrade_step) can't tell these two failure
+// modes apart from its own io::Error alone in a way that's worth surfacing
+// differently, but `docker info` can: NotFound means the binary isn't on
+// PATH at all (Docker was never installed), anything else means it's
+// installed but the daemon isn't answering (Docker Desktop isn't running).
+async fn check_docker_available() -> Result<(), String> {
+    match Command::new("docker")
+        .arg("info")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+    {
+        Ok(status) if status.success() => Ok(()),
+        Ok(_) => Err(
+            "Docker is installed but not running. Start Docker Desktop, then try training again.".into(),
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(
+            "Docker was not found. Install Docker Desktop (https://www.docker.com/products/docker-desktop/) and start it before training locally.".into(),
+        ),
+        Err(e) => Err(format!("could not check Docker status: {e}")),
+    }
 }
 
 async fn run_freqtrade_step(app: &AppHandle, bot_id: &str, work_dir: &Path, args: &[&str]) -> Result<(), String> {
