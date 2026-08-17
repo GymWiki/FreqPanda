@@ -206,6 +206,14 @@ model BotConfiguration {
   // dynamically trades whatever the exchange's own top-liquid USDT markets
   // are at the time, re-evaluated on freqtrade's own refresh_period.
   autoSelectCoins Boolean @default(true) @map("auto_select_coins")
+  // How many of the exchange's top-liquid USDT markets VolumePairList hands
+  // to FreqAI when auto-select is on (see AUTO_PAIRLIST_SIZE_RANGE in
+  // lib/hetzner.ts for the enforced min/max) — user-chosen per bot via the
+  // slider in NewBotDialog/BotCard, replacing what used to be a single
+  // hardcoded constant. Only meaningful when autoSelectCoins is true, but
+  // always has a value (defaults to the old hardcoded 30) since the slider
+  // needs something to show even for a manual-pairlist bot switching modes.
+  autoSelectPairCount Int @default(30) @map("auto_select_pair_count")
   // The user's manual pair selection. Only required (and only read) when
   // autoSelectCoins is false — null/empty whenever auto-select is on.
   pairWhitelist String? @map("pair_whitelist") // comma-separated pairs, e.g. "BTC/USDT,ETH/USDT"

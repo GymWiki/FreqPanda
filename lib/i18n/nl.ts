@@ -138,6 +138,18 @@ export const nl = {
     maxPerTradeHint: (amount: string) => `De bot zet maximaal €${amount} in per trade, en alleen als de AI zeker is.`,
   },
 
+  pairCountSlider: {
+    label: "Aantal paren (top volume)",
+    ariaLabel: "Aantal paren dat automatisch geselecteerd wordt, op handelsvolume",
+    adviceLow: "Minder paren = snellere training, minder spreiding.",
+    adviceMedium: "Een gebalanceerde mix tussen trainingssnelheid en marktdekking.",
+    adviceHigh: "Meer paren = bredere marktdekking, langere trainingstijd.",
+    estimatedTimeLabel: (time: string) => `Geschatte trainingstijd: ${time}`,
+    underAMinute: "< 1 min",
+    minutesEstimate: (n: number) => `~${n} min`,
+    hoursEstimate: (n: number) => `~${n} uur`,
+  },
+
   exchangeCombobox: {
     placeholder: "Kies een exchange",
     searchPlaceholder: "Zoek een exchange…",

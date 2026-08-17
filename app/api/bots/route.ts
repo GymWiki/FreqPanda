@@ -11,6 +11,7 @@ import {
   MAX_STRATEGY_CODE_LENGTH,
 } from "@/lib/strategy-validation";
 import { withErrorHandling, parseJsonBody } from "@/lib/api-handler";
+import { AUTO_PAIRLIST_SIZE_RANGE, AUTO_PAIRLIST_SIZE_DEFAULT } from "@/lib/training-timerange";
 
 export const dynamic = "force-dynamic";
 
@@ -32,6 +33,12 @@ const createBotBodySchema = z.object({
   strategyCode: z.string().min(1, "strategyCode is required"),
   freqaiConfig: z.record(z.string(), z.unknown()),
   autoSelectCoins: z.boolean().optional(),
+  autoSelectPairCount: z
+    .number()
+    .int()
+    .min(AUTO_PAIRLIST_SIZE_RANGE.min)
+    .max(AUTO_PAIRLIST_SIZE_RANGE.max)
+    .optional(),
   pairWhitelist: z.string().optional(),
 });
 
@@ -64,7 +71,8 @@ export const POST = withErrorHandling(async (req: NextRequest) => {
 
   const parsed = await parseJsonBody(req, createBotBodySchema);
   if ("error" in parsed) return parsed.error;
-  const { botName, strategy, strategyCode, freqaiConfig, autoSelectCoins, pairWhitelist } = parsed.data;
+  const { botName, strategy, strategyCode, freqaiConfig, autoSelectCoins, autoSelectPairCount, pairWhitelist } =
+    parsed.data;
 
   // Defaults to on (matches BotConfiguration.autoSelectCoins @default(true))
   // — an explicit false is the only way to require a manual whitelist.
@@ -125,6 +133,7 @@ export const POST = withErrorHandling(async (req: NextRequest) => {
       strategyCode,
       freqaiConfig: freqaiConfig as Prisma.InputJsonValue,
       autoSelectCoins: autoSelect,
+      autoSelectPairCount: autoSelectPairCount ?? AUTO_PAIRLIST_SIZE_DEFAULT,
       pairWhitelist: autoSelect ? null : pairWhitelist,
       isPaperTrading: true,
       deploymentStatus: "LOCAL",

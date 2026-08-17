@@ -207,6 +207,7 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
         // an exchange yet (see prisma/schema.prisma).
         exchangeName: bot.exchangeName ?? "",
         autoSelectCoins: bot.autoSelectCoins,
+        autoSelectPairCount: bot.autoSelectPairCount,
         pairWhitelist: bot.pairWhitelist ?? "",
       });
 
@@ -232,7 +233,9 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
       pair_whitelist: bot.autoSelectCoins
         ? null
         : bot.pairWhitelist?.split(",").map((p) => p.trim()) ?? null,
-      pairlist_method: bot.autoSelectCoins ? "VolumePairList (top 30 USDT by volume)" : "StaticPairList",
+      pairlist_method: bot.autoSelectCoins
+        ? `VolumePairList (top ${bot.autoSelectPairCount} USDT by volume)`
+        : "StaticPairList",
       stake_amount: "unlimited",
       custom_user_settings: {
         total_budget: bot.totalBudget ?? DEFAULT_PAPER_TOTAL_BUDGET,

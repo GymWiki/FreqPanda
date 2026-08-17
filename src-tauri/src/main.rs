@@ -44,6 +44,7 @@ async fn train_local_model(
     strategy_code: String,
     exchange_name: String,
     auto_select_coins: bool,
+    auto_select_pair_count: u32,
     pair_whitelist: String,
 ) -> Result<String, String> {
     // `strategy` becomes a filename (user_data/strategies/<strategy>.py) —
@@ -77,10 +78,11 @@ async fn train_local_model(
         .map_err(|e| format!("could not write strategy file: {e}"))?;
 
     // Mirrors buildPairlistConfig in lib/hetzner.ts: auto-select hands the
-    // pair universe to freqtrade's own VolumePairList (top-30 USDT markets
-    // by 24h volume) instead of requiring the user to have typed a manual
-    // list — local training should behave identically to cloud training,
-    // not silently fall back to a stricter rule.
+    // pair universe to freqtrade's own VolumePairList (top-N USDT markets by
+    // 24h volume, N chosen by the user via the slider — see
+    // AUTO_PAIRLIST_SIZE_RANGE in lib/hetzner.ts for the same clamp applied
+    // here) instead of requiring the user to have typed a manual list.
+    let clamped_pair_count = auto_select_pair_count.clamp(10, 200);
     // FreqAI's own JSON schema requires feature_parameters.include_corr_pairlist
     // (alongside include_timeframes) — must stay in sync with
     // DEFAULT_CORR_PAIRLIST in lib/hetzner.ts, the same fix applied there
@@ -113,7 +115,7 @@ async fn train_local_model(
             serde_json::json!([".*/USDT"]),
             serde_json::json!([{
                 "method": "VolumePairList",
-                "number_assets": 30,
+                "number_assets": clamped_pair_count,
                 "sort_key": "quoteVolume",
                 "min_value": 0,
                 "refresh_period": 1800,

@@ -1,12 +1,17 @@
 import { isSafePythonIdentifier } from "@/lib/strategy-validation";
 import type { FreqAIProfileConfig } from "@/lib/strategy-presets";
 import { EXCHANGE_PRESETS } from "@/lib/exchange-presets";
-import { STAKE_CURRENCY, DEFAULT_CORR_PAIRLIST } from "@/lib/training-timerange";
+import {
+  STAKE_CURRENCY,
+  DEFAULT_CORR_PAIRLIST,
+  AUTO_PAIRLIST_SIZE_RANGE,
+  AUTO_PAIRLIST_SIZE_DEFAULT,
+} from "@/lib/training-timerange";
 
 // Re-exported so every existing "@/lib/hetzner" import of these keeps
 // working unchanged — see training-timerange.ts's own doc comment for why
 // the values themselves now live there instead.
-export { STAKE_CURRENCY, DEFAULT_CORR_PAIRLIST };
+export { STAKE_CURRENCY, DEFAULT_CORR_PAIRLIST, AUTO_PAIRLIST_SIZE_RANGE, AUTO_PAIRLIST_SIZE_DEFAULT };
 
 const HETZNER_API_BASE = "https://api.hetzner.cloud/v1";
 
@@ -492,10 +497,14 @@ function writeFilesBlock(entries: Array<{ path: string; content: string; permiss
 // still serving the EEA normally.
 export const DATA_SOURCE_EXCHANGE = "okx";
 
-// How many of the exchange's top-liquid USDT markets VolumePairList hands
-// to FreqAI when auto-select is on — wide enough for the AI to find real
-// opportunities, small enough that a single training run stays bounded.
-export const AUTO_PAIRLIST_SIZE = 30;
+// clamped rather than trusted as-is: below AUTO_PAIRLIST_SIZE_RANGE.min
+// there's too little diversification for FreqAI to find real
+// opportunities, above .max a single local training run (Docker on the
+// user's own machine, not a beefy cloud box) stops being a "grab a coffee"
+// wait.
+function clampAutoPairlistSize(count: number): number {
+  return Math.min(AUTO_PAIRLIST_SIZE_RANGE.max, Math.max(AUTO_PAIRLIST_SIZE_RANGE.min, Math.round(count)));
+}
 
 // The taker fee freqtrade uses to simulate costs during backtesting/
 // dry-run (config's top-level "fee" key — see EXCHANGE_PRESETS for the
@@ -520,14 +529,14 @@ interface PairlistConfig {
 // trading where there's real volume instead of stalling on a pair that
 // went quiet. Manual mode is the opposite trade-off — a fixed, predictable
 // set the user explicitly chose — via StaticPairList.
-function buildPairlistConfig(autoSelectCoins: boolean, pairWhitelist: string[]): PairlistConfig {
+function buildPairlistConfig(autoSelectCoins: boolean, pairWhitelist: string[], autoSelectPairCount: number): PairlistConfig {
   if (autoSelectCoins) {
     return {
       pair_whitelist: [`.*/${STAKE_CURRENCY}`],
       pairlists: [
         {
           method: "VolumePairList",
-          number_assets: AUTO_PAIRLIST_SIZE,
+          number_assets: clampAutoPairlistSize(autoSelectPairCount),
           sort_key: "quoteVolume",
           min_value: 0,
           refresh_period: 1800,
@@ -586,6 +595,8 @@ interface CloudInitParams {
   freqaiConfig: FreqAIProfileConfig;
   /** When true, pairWhitelist below is ignored and VolumePairList picks the pairs instead (see buildPairlistConfig). */
   autoSelectCoins: boolean;
+  /** How many top-liquid pairs VolumePairList hands to FreqAI — only meaningful when autoSelectCoins is true (see AUTO_PAIRLIST_SIZE_RANGE). */
+  autoSelectPairCount: number;
   /** The user's manual pair selection — only used when autoSelectCoins is false. */
   pairWhitelist: string[];
   /** Total amount (stake_currency) this bot may put to work. freqtrade itself is told "unlimited" — custom_stake_amount in the strategy code is the real sizing logic, reading this back via custom_user_settings. */
@@ -647,6 +658,7 @@ export function buildFreqtradeCloudInit(params: CloudInitParams): string {
     strategyCode,
     freqaiConfig,
     autoSelectCoins,
+    autoSelectPairCount,
     pairWhitelist,
     totalBudget,
     maxStakePercentage,
@@ -665,7 +677,7 @@ export function buildFreqtradeCloudInit(params: CloudInitParams): string {
 
   assertSafePythonIdentifier(strategy, "strategy");
   const safeBotName = botName.toLowerCase().replace(/[^a-z0-9-]/g, "-");
-  const pairlistConfig = buildPairlistConfig(autoSelectCoins, pairWhitelist);
+  const pairlistConfig = buildPairlistConfig(autoSelectCoins, pairWhitelist, autoSelectPairCount);
   // A bot only ever reaches here with exchangeName null while paper
   // trading (live requires a verified ExchangeConnection, which always
   // sets it — see the CloudInitParams doc comment above) — falls back to

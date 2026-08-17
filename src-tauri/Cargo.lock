@@ -909,7 +909,7 @@ dependencies = [
 
 [[package]]
 name = "freqtrade-command-center"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "reqwest",
  "serde",

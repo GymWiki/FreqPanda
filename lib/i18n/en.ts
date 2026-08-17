@@ -133,6 +133,18 @@ export const en: Dictionary = {
     maxPerTradeHint: (amount: string) => `The bot stakes at most €${amount} per trade, and only when the AI is confident.`,
   },
 
+  pairCountSlider: {
+    label: "Number of pairs (top volume)",
+    ariaLabel: "Number of pairs auto-selected by trading volume",
+    adviceLow: "Fewer pairs = faster training, less diversification.",
+    adviceMedium: "A balanced mix of training speed and market coverage.",
+    adviceHigh: "More pairs = broader market coverage, longer training time.",
+    estimatedTimeLabel: (time: string) => `Estimated training time: ${time}`,
+    underAMinute: "< 1 min",
+    minutesEstimate: (n: number) => `~${n} min`,
+    hoursEstimate: (n: number) => `~${n} hr`,
+  },
+
   exchangeCombobox: {
     placeholder: "Choose an exchange",
     searchPlaceholder: "Search for an exchange…",

@@ -7,7 +7,9 @@ import { InfoTooltip } from "@/components/ui/Tooltip";
 import { StrategyPicker } from "@/components/ui/StrategyPicker";
 import { PairSelector } from "@/components/ui/PairSelector";
 import { Switch } from "@/components/ui/Switch";
+import { PairCountSlider } from "@/components/ui/PairCountSlider";
 import { STRATEGY_PRESETS, type StrategyPreset } from "@/lib/strategy-presets";
+import { AUTO_PAIRLIST_SIZE_DEFAULT } from "@/lib/training-timerange";
 import { apiFetch, toErrorMessage } from "@/lib/api-client";
 import { useDictionary } from "@/components/I18nProvider";
 
@@ -21,6 +23,7 @@ const EMPTY_FORM = {
   botName: "",
   strategyId: DEFAULT_STRATEGY.id,
   autoSelectCoins: true,
+  autoSelectPairCount: AUTO_PAIRLIST_SIZE_DEFAULT,
   pairs: ["BTC/USDT", "ETH/USDT"] as string[],
 };
 
@@ -60,6 +63,7 @@ export function NewBotDialog({ onCreated }: NewBotDialogProps) {
           strategyCode: selectedStrategy.code,
           freqaiConfig: selectedStrategy.freqaiConfig,
           autoSelectCoins: form.autoSelectCoins,
+          autoSelectPairCount: form.autoSelectPairCount,
           pairWhitelist: form.autoSelectCoins ? undefined : form.pairs.join(","),
         }),
       });
@@ -132,9 +136,15 @@ export function NewBotDialog({ onCreated }: NewBotDialogProps) {
                 </div>
 
                 {form.autoSelectCoins ? (
-                  <p className="rounded-lg bg-background px-3 py-2 text-[11px] leading-relaxed text-slate-400">
-                    {dict.newBot.autoSelectHint}
-                  </p>
+                  <>
+                    <p className="rounded-lg bg-background px-3 py-2 text-[11px] leading-relaxed text-slate-400">
+                      {dict.newBot.autoSelectHint}
+                    </p>
+                    <PairCountSlider
+                      value={form.autoSelectPairCount}
+                      onChange={(autoSelectPairCount) => setForm({ ...form, autoSelectPairCount })}
+                    />
+                  </>
                 ) : (
                   <PairSelector selected={form.pairs} onChange={(pairs) => setForm({ ...form, pairs })} />
                 )}

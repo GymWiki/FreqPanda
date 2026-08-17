@@ -16,6 +16,7 @@ export const botSelect = {
   strategyCode: true,
   freqaiConfig: true,
   autoSelectCoins: true,
+  autoSelectPairCount: true,
   pairWhitelist: true,
   totalBudget: true,
   maxStakePercentage: true,

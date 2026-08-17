@@ -118,6 +118,7 @@ export async function deployBotToVps({ bot, supabase }: DeployBotParams) {
     strategyCode: bot.strategyCode,
     freqaiConfig: bot.freqaiConfig as unknown as FreqAIProfileConfig,
     autoSelectCoins: bot.autoSelectCoins,
+    autoSelectPairCount: bot.autoSelectPairCount,
     pairWhitelist: bot.pairWhitelist ? bot.pairWhitelist.split(",").map((p) => p.trim()).filter(Boolean) : [],
     totalBudget: bot.totalBudget ?? DEFAULT_PAPER_TOTAL_BUDGET,
     maxStakePercentage: bot.maxStakePercentage ?? DEFAULT_PAPER_MAX_STAKE_PERCENTAGE,

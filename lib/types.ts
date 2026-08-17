@@ -39,6 +39,10 @@ export interface BotConfigurationDTO {
   strategyCode: string;
   freqaiConfig: FreqAIProfileConfig;
   autoSelectCoins: boolean;
+  // Only meaningful when autoSelectCoins is true — how many top-liquid
+  // USDT pairs VolumePairList should hand to FreqAI (see
+  // AUTO_PAIRLIST_SIZE_RANGE in lib/hetzner.ts for the enforced range).
+  autoSelectPairCount: number;
   pairWhitelist: string | null;
   totalBudget: number | null;
   maxStakePercentage: number | null;
