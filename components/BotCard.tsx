@@ -24,6 +24,8 @@ import {
 } from "lucide-react";
 import type { BotConfigurationDTO, ExchangeConnectionDTO } from "@/lib/types";
 import { StatusBadge } from "@/components/ui/StatusBadge";
+import { LifecycleBadge } from "@/components/ui/LifecycleBadge";
+import { deriveLifecycleStatus } from "@/lib/bot-lifecycle";
 import { GoLiveModal } from "@/components/GoLiveModal";
 import { ConnectExchangeDialog } from "@/components/ConnectExchangeDialog";
 import { TradeHistoryFeed } from "@/components/TradeHistoryFeed";
@@ -83,6 +85,7 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
   // correctness guarantee.
   const autoCompoundInFlight = useRef(false);
 
+  const lifecycleStatus = deriveLifecycleStatus(bot, isTrainingLocally);
   const canGoLive = bot.status === "TRAINING_PAPER_TRADE" && bot.deploymentStatus === "VPS_ACTIVE";
   const isPaused = bot.status === "PAUSED_EMERGENCY" || bot.status === "SLEEPING" || bot.status === "PAUSED_MANUAL";
   // Only this bot's own, currently-running trading loop can be stopped —
@@ -256,25 +259,28 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
 
   async function handleDeploy() {
     setError(null);
+    // Belt-and-suspenders: the button below is already disabled without a
+    // model (see !bot.aiModelPath in its disabled prop), but the server
+    // itself is the real guard (lib/deploy-bot.ts throws "Upload a trained
+    // .joblib model before deploying") — this just turns that into an
+    // immediate, translated message instead of a round-trip.
+    if (!bot.aiModelPath) {
+      setError(dict.botCard.deployNeedsModel);
+      return;
+    }
     setIsDeploying(true);
     try {
       const data = await apiFetch<{
-        requiresCheckout: boolean;
-        checkoutUrl?: string;
-        bot?: BotConfigurationDTO;
-        apiCredentials?: { username: string; password: string };
+        bot: BotConfigurationDTO;
+        apiCredentials: { username: string; password: string };
       }>("/api/deploy", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ botId: bot.id }),
       });
 
-      if (data.requiresCheckout) {
-        if (data.checkoutUrl) window.location.href = data.checkoutUrl;
-        return;
-      }
-      if (data.bot) onUpdate(data.bot);
-      if (data.apiCredentials) setApiCredentials(data.apiCredentials);
+      onUpdate(data.bot);
+      setApiCredentials(data.apiCredentials);
     } catch (err) {
       setError(toErrorMessage(err, dict.botCard.deployFailed));
     } finally {
@@ -332,7 +338,10 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
     <div className="card-surface flex flex-col gap-4 p-5">
       <div className="flex items-start justify-between gap-2">
         <div>
-          <h3 className="font-semibold">{bot.botName}</h3>
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="font-semibold">{bot.botName}</h3>
+            <LifecycleBadge status={lifecycleStatus} />
+          </div>
           <p className="text-xs text-slate-400">
             {bot.exchangeName ? <>{bot.exchangeName} &middot; </> : null}
             {bot.strategy}
@@ -586,7 +595,8 @@ export function BotCard({ bot, onUpdate, onDelete }: BotCardProps) {
         <button
           type="button"
           onClick={handleDeploy}
-          disabled={isDeploying || bot.deploymentStatus === "VPS_ACTIVE"}
+          disabled={isDeploying || bot.deploymentStatus === "VPS_ACTIVE" || !bot.aiModelPath}
+          title={!bot.aiModelPath && bot.deploymentStatus !== "VPS_ACTIVE" ? dict.botCard.deployNeedsModel : undefined}
           className="flex items-center justify-center gap-1.5 rounded-lg bg-primary px-3 py-2 text-xs font-semibold text-background transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
         >
           {isDeploying ? (

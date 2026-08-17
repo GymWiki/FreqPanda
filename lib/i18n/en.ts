@@ -34,6 +34,18 @@ export const en: Dictionary = {
     inactive: "Inactive",
   },
 
+  lifecycleBadge: {
+    notTrained: "Not trained yet",
+    training: "Training…",
+    ready: "Ready to use",
+    activePaper: "Active — paper trading",
+    activeLive: "Active — live trading",
+    pausedManual: "Stopped",
+    pausedEmergency: "Emergency stop active",
+    sleeping: "Sleeping",
+    error: "Error",
+  },
+
   botCard: {
     resumeFailed: "Couldn't resume",
     stopFailed: "Couldn't stop",
@@ -85,6 +97,7 @@ export const en: Dictionary = {
     localConfig: "Download settings",
     deployed: "Live",
     deployToCloud: "Start bot",
+    deployNeedsModel: "Train an AI model first before starting the bot.",
     showCredentials: "Show login details",
     apiCredentialsHint: (ip: string) => `Freqtrade API at ${ip}:8080 — save this now, it won't be shown in full again after this.`,
     username: "Username",

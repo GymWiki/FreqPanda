@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { createClient } from "@/lib/supabase/server";
 import { prisma } from "@/lib/prisma";
+import { stripe } from "@/lib/stripe";
 import { decrypt } from "@/lib/encryption";
 import { fetchFreeBalance } from "@/lib/ccxt-client";
 import { assertCanTrade, BotBusyError } from "@/lib/bot-status";
@@ -107,6 +108,50 @@ export const POST = withErrorHandling(async (req: NextRequest, { params }: { par
   const parsed = await parseJsonBody(req, goLiveBodySchema);
   if ("error" in parsed) return parsed.error;
   const { totalBudget, maxStakePercentage } = parsed.data;
+
+  // The billing/quota gate lives here, not on the initial paper-trading
+  // deploy (see app/api/deploy/route.ts) — paper trading must always be
+  // free to start, with no payment method required. Going live is the one
+  // moment real money actually enters the picture, so it's the one moment
+  // billing applies. Counts LIVE bots specifically (isPaperTrading: false),
+  // not every VPS_ACTIVE bot — this bot itself is still VPS_ACTIVE from its
+  // paper deploy and must not count against its own quota check.
+  const profile = await prisma.profile.findUnique({ where: { id: user.id } });
+  if (!profile) {
+    return NextResponse.json({ error: "Profile not found for this account" }, { status: 404 });
+  }
+  const activeLiveBots = await prisma.botConfiguration.count({
+    where: { userId: profile.id, deploymentStatus: "VPS_ACTIVE", isPaperTrading: false },
+  });
+
+  // Not enough quota purchased — send the user to Stripe Checkout to bump
+  // the quantity on their per-bot subscription before this bot goes live.
+  if (activeLiveBots >= profile.vpsBotQuota) {
+    const priceId = process.env.STRIPE_VPS_BOT_PRICE_ID;
+    if (!priceId) {
+      return NextResponse.json({ error: "Billing is not configured" }, { status: 500 });
+    }
+
+    let checkoutSession;
+    try {
+      checkoutSession = await stripe.checkout.sessions.create({
+        mode: "subscription",
+        client_reference_id: profile.id,
+        customer: profile.stripeCustomerId ?? undefined,
+        customer_email: profile.stripeCustomerId ? undefined : user.email,
+        line_items: [{ price: priceId, quantity: activeLiveBots + 1 }],
+        success_url: `${process.env.NEXT_PUBLIC_APP_URL}/dashboard?checkout=success`,
+        cancel_url: `${process.env.NEXT_PUBLIC_APP_URL}/dashboard?checkout=cancelled`,
+        metadata: { userId: profile.id },
+      });
+    } catch (err) {
+      console.error("[golive] Stripe checkout session creation failed:", err);
+      const message = err instanceof Error ? err.message : "Could not start checkout";
+      return NextResponse.json({ error: `Billing error: ${message}` }, { status: 502 });
+    }
+
+    return NextResponse.json({ requiresCheckout: true, checkoutUrl: checkoutSession.url });
+  }
 
   // This is the actual gate (part 1/3 + part 2/7 of the "no shared,
   // unverified credentials for real money" requirement) — the GET above is

@@ -62,12 +62,21 @@ export function GoLiveModal({ bot, onClose, onLive }: GoLiveModalProps) {
     setSubmitError(null);
     setIsSubmitting(true);
     try {
-      const data = await apiFetch<{ bot: BotConfigurationDTO }>(`/api/bots/${bot.id}/golive`, {
+      const data = await apiFetch<{
+        requiresCheckout?: boolean;
+        checkoutUrl?: string;
+        bot?: BotConfigurationDTO;
+      }>(`/api/bots/${bot.id}/golive`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ totalBudget, maxStakePercentage }),
       });
-      onLive(data.bot);
+
+      if (data.requiresCheckout) {
+        if (data.checkoutUrl) window.location.href = data.checkoutUrl;
+        return;
+      }
+      if (data.bot) onLive(data.bot);
     } catch (err) {
       setSubmitError(toErrorMessage(err, dict.goLive.goLiveFailed));
     } finally {

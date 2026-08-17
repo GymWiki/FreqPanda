@@ -35,6 +35,18 @@ export const nl = {
     inactive: "Niet actief",
   },
 
+  lifecycleBadge: {
+    notTrained: "Nog niet getraind",
+    training: "Wordt getraind…",
+    ready: "Klaar om te gebruiken",
+    activePaper: "Actief — paper trading",
+    activeLive: "Actief — live trading",
+    pausedManual: "Gestopt",
+    pausedEmergency: "Noodstop actief",
+    sleeping: "Slaapstand",
+    error: "Fout",
+  },
+
   botCard: {
     resumeFailed: "Hervatten is mislukt",
     stopFailed: "Stoppen is mislukt",
@@ -86,6 +98,7 @@ export const nl = {
     localConfig: "Instellingen downloaden",
     deployed: "Actief",
     deployToCloud: "Bot starten",
+    deployNeedsModel: "Train eerst een AI-model voordat je de bot start.",
     showCredentials: "Toon inloggegevens",
     apiCredentialsHint: (ip: string) =>
       `Freqtrade API op ${ip}:8080 — bewaar dit nu, het wordt hierna niet meer volledig getoond.`,
