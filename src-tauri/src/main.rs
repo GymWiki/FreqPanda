@@ -385,10 +385,26 @@ fn training_container_name(bot_id: &str, step: &str) -> String {
 // edit can't silently drop a requirement without a build-time... no, a
 // *run*-time failure, immediately, before Docker is ever spawned.
 //
-// This checklist exists because FOUR separate freqtrade requirements have
-// each, independently, been discovered missing or wrong here and shipped
-// as regressions before this restructure — every one of them is now both
-// baked into this function AND checked by validate_local_training_config:
+// This checklist exists because freqtrade requirements kept surfacing here
+// one at a time, each independently discovered by hitting a crash first:
+// wrong/missing pairlist, missing entry_pricing/exit_pricing, and finally
+// four MORE missing feature_parameters keys, all found the same way —
+// KeyError: 'indicator_periods_candles' from freqtrade/data/dataprovider.py's
+// get_required_startup(). That last one prompted an actual audit instead of
+// another one-field patch: freqtrade's own docs/freqai-parameter-table.md
+// "Required" column turned out to be an unreliable source (it doesn't mark
+// indicator_periods_candles required at all, despite the crash) — the only
+// way to know for certain whether a field is a hard requirement is whether
+// freqtrade's own Python does a raw `dict[...]` subscript on it somewhere
+// with no `.get(..., default)` fallback. So this checklist is built from a
+// direct read of freqtrade's `stable` branch source (dataprovider.py's
+// get_required_startup, freqai/data_kitchen.py, freqai/freqai_interface.py)
+// for every such raw access on freqai/feature_parameters keys, cross-checked
+// against freqtrade's own config_examples/config_freqai.example.json for
+// sensible default values — not just the parameter-table docs, which this
+// investigation showed can't be trusted alone. Every requirement found is
+// now both baked into this function AND checked by
+// validate_local_training_config:
 //
 //   1. PAIRLIST — must be a concrete StaticPairList with a real pair list,
 //      NEVER VolumePairList and NEVER a ".*/USDT" wildcard. freqtrade's
@@ -401,16 +417,47 @@ fn training_container_name(bot_id: &str, step: &str) -> String {
 //      VolumePairList only in a throwaway probe config that never reaches
 //      this function or Docker) — this function only accepts already-
 //      concrete pairs via `params.pair_whitelist`, it never resolves them.
-//   2. freqai.feature_parameters.include_corr_pairlist — required by
-//      FreqAI's own JSON schema whenever freqai.enabled is true.
-//   3. entry_pricing / exit_pricing — freqtrade's Exchange.validate_config
+//   2. entry_pricing / exit_pricing — freqtrade's Exchange.validate_config
 //      does a raw `config["exit_pricing"]`/`config["entry_pricing"]` dict
 //      subscript with no schema default, so a missing key crashes with a
 //      bare KeyError rather than a readable validation error.
-//   4. --timerange (a CLI arg passed to download-data/backtesting, not
+//   3. freqai.feature_parameters.include_corr_pairlist /
+//      include_timeframes — required by FreqAI's own JSON schema whenever
+//      freqai.enabled is true (raw-accessed via .get() with no default in
+//      freqai/data_kitchen.py, so a missing value surfaces later as a
+//      confusing None/empty-list failure rather than a clean error here).
+//   4. freqai.feature_parameters.indicator_periods_candles — raw
+//      `feature_parameters["indicator_periods_candles"]` subscript in
+//      dataprovider.py's get_required_startup(). THE crash that triggered
+//      this whole audit. Default [10, 20] — freqtrade's own example config.
+//   5. freqai.feature_parameters.include_shifted_candles — raw subscript
+//      in data_kitchen.py's feature-shifting loop. Default 2 — freqtrade's
+//      own example config.
+//   6. freqai.feature_parameters.buffer_train_data_candles — raw subscript
+//      in data_kitchen.py. Default 0 — freqtrade's own documented default.
+//   7. freqai.feature_parameters.shuffle_after_split — raw subscript
+//      (`feat_dict["shuffle_after_split"]`, where feat_dict IS
+//      feature_parameters directly, not a copy with merged defaults) in
+//      data_kitchen.py's make_train_test_datasets(). Default false —
+//      freqtrade's own documented default, and the behaviorally correct
+//      one for time-series data regardless (don't shuffle train/test
+//      chronological order).
+//   8. --timerange (a CLI arg passed to download-data/backtesting, not
 //      part of this JSON, but validated alongside it — see
 //      validate_local_training_config) — FreqAI backtesting refuses to
 //      run without one.
+//
+// Deliberately NOT added, despite appearing in freqtrade's example config:
+// DI_threshold, weight_factor, principal_component_analysis,
+// use_SVM_to_remove_outliers, use_DBSCAN_to_remove_outliers, svm_params,
+// plot_feature_importances, reverse_train_test_order, label_period_candles.
+// Every one of these is accessed via `.get(key, some_default)` in
+// freqtrade's own source (confirmed in the same audit) — omitting them
+// changes nothing but which documented default applies, so adding them
+// would just be silently opinionated tuning dressed up as a required-field
+// fix. label_period_candles specifically: this app's generated strategies
+// (lib/strategy-presets.ts's set_freqai_targets) hardcode their own
+// look-ahead via `.shift(-N)` and never read this config key at all.
 //
 // Keep this in sync with whatever lib/hetzner.ts's own required-field
 // comments (PRICE_DISCOVERY_CONFIG, DEFAULT_MAX_OPEN_TRADES, buildPairlistConfig,
@@ -452,7 +499,7 @@ fn build_local_training_config(params: &LocalTrainingConfigParams) -> serde_json
         // StaticPairList, always — never VolumePairList, which freqtrade
         // itself refuses under backtesting.
         "pairlists": [{ "method": "StaticPairList" }],
-        // ===== Requirement 3: entry_pricing / exit_pricing =====
+        // ===== Requirement 2: entry_pricing / exit_pricing =====
         "entry_pricing": { "price_side": "same", "use_order_book": true, "order_book_top": 1 },
         "exit_pricing": { "price_side": "same", "use_order_book": true, "order_book_top": 1 },
         "freqai": {
@@ -461,10 +508,17 @@ fn build_local_training_config(params: &LocalTrainingConfigParams) -> serde_json
             "train_period_days": params.train_period_days,
             "backtest_period_days": params.backtest_period_days,
             "feature_parameters": {
-                // ===== Requirement: timeframes consistent with download =====
+                // ===== Requirement 3: include_timeframes / include_corr_pairlist =====
                 "include_timeframes": [params.base_timeframe],
-                // ===== Requirement 2: include_corr_pairlist =====
                 "include_corr_pairlist": [params.corr_pair],
+                // ===== Requirement 4: indicator_periods_candles =====
+                "indicator_periods_candles": [10, 20],
+                // ===== Requirement 5: include_shifted_candles =====
+                "include_shifted_candles": 2,
+                // ===== Requirement 6: buffer_train_data_candles =====
+                "buffer_train_data_candles": 0,
+                // ===== Requirement 7: shuffle_after_split =====
+                "shuffle_after_split": false,
             },
             "data_split_parameters": { "test_size": 0.25 }
         }
@@ -527,7 +581,7 @@ fn validate_local_training_config(config: &serde_json::Value, timerange: &str, d
         }
     }
 
-    // ===== Requirement 3: entry_pricing / exit_pricing =====
+    // ===== Requirement 2: entry_pricing / exit_pricing =====
     for pricing_key in ["entry_pricing", "exit_pricing"] {
         let pricing_value = config.get(pricing_key);
         if !matches!(pricing_value, Some(v) if v.is_object()) {
@@ -538,20 +592,15 @@ fn validate_local_training_config(config: &serde_json::Value, timerange: &str, d
         }
     }
 
-    // ===== Requirement 2: include_corr_pairlist =====
-    let has_corr_pairlist = config
-        .get("freqai")
-        .and_then(|f| f.get("feature_parameters"))
-        .and_then(|f| f.get("include_corr_pairlist"))
-        .is_some();
-    if !has_corr_pairlist {
+    let feature_parameters = config.get("freqai").and_then(|f| f.get("feature_parameters"));
+
+    // ===== Requirement 3: include_corr_pairlist =====
+    if feature_parameters.and_then(|f| f.get("include_corr_pairlist")).is_none() {
         return Err("generated config.json is missing freqai.feature_parameters.include_corr_pairlist".into());
     }
 
-    // ===== Requirement: timeframes consistent with what's downloaded =====
-    let declares_download_timeframe = config
-        .get("freqai")
-        .and_then(|f| f.get("feature_parameters"))
+    // ===== Requirement 3 (continued): timeframes consistent with what's downloaded =====
+    let declares_download_timeframe = feature_parameters
         .and_then(|f| f.get("include_timeframes"))
         .and_then(|v| v.as_array())
         .is_some_and(|timeframes| timeframes.iter().any(|t| t.as_str() == Some(download_timeframe)));
@@ -561,7 +610,36 @@ fn validate_local_training_config(config: &serde_json::Value, timerange: &str, d
         ));
     }
 
-    // ===== Requirement 4: --timerange =====
+    // ===== Requirement 4: indicator_periods_candles =====
+    // Raw `feature_parameters["indicator_periods_candles"]` subscript in
+    // freqtrade/data/dataprovider.py's get_required_startup() — a missing
+    // key here is a bare Python KeyError, not a schema validation message.
+    let has_indicator_periods = feature_parameters
+        .and_then(|f| f.get("indicator_periods_candles"))
+        .and_then(|v| v.as_array())
+        .is_some_and(|periods| !periods.is_empty() && periods.iter().all(|p| p.as_u64().is_some()));
+    if !has_indicator_periods {
+        return Err(
+            "generated config.json's freqai.feature_parameters.indicator_periods_candles is missing, empty, or not a list of positive integers".into(),
+        );
+    }
+
+    // ===== Requirement 5: include_shifted_candles =====
+    if feature_parameters.and_then(|f| f.get("include_shifted_candles")).and_then(|v| v.as_u64()).is_none() {
+        return Err("generated config.json's freqai.feature_parameters.include_shifted_candles is missing or not a non-negative integer".into());
+    }
+
+    // ===== Requirement 6: buffer_train_data_candles =====
+    if feature_parameters.and_then(|f| f.get("buffer_train_data_candles")).and_then(|v| v.as_u64()).is_none() {
+        return Err("generated config.json's freqai.feature_parameters.buffer_train_data_candles is missing or not a non-negative integer".into());
+    }
+
+    // ===== Requirement 7: shuffle_after_split =====
+    if feature_parameters.and_then(|f| f.get("shuffle_after_split")).and_then(|v| v.as_bool()).is_none() {
+        return Err("generated config.json's freqai.feature_parameters.shuffle_after_split is missing or not a boolean".into());
+    }
+
+    // ===== Requirement 8: --timerange =====
     if timerange.trim().is_empty() {
         return Err("timerange must not be empty — FreqAI backtesting refuses to run without --timerange".into());
     }
@@ -666,6 +744,53 @@ mod local_training_config_tests {
         // told to fetch "1h" instead — these must never disagree.
         let err = validate_local_training_config(&valid_config(), VALID_TIMERANGE, "1h").unwrap_err();
         assert!(err.contains("include_timeframes"), "error should name the field, got: {err}");
+    }
+
+    #[test]
+    fn rejects_a_config_missing_indicator_periods_candles() {
+        // Regression coverage for the actual bug that triggered this whole
+        // audit: freqtrade's dataprovider.py crashes with a raw
+        // `KeyError: 'indicator_periods_candles'` — must never reach
+        // `docker run` again.
+        let mut config = valid_config();
+        config["freqai"]["feature_parameters"].as_object_mut().unwrap().remove("indicator_periods_candles");
+        let err = validate_local_training_config(&config, VALID_TIMERANGE, VALID_TIMEFRAME).unwrap_err();
+        assert!(err.contains("indicator_periods_candles"), "error should name the missing key, got: {err}");
+    }
+
+    #[test]
+    fn rejects_an_empty_indicator_periods_candles() {
+        let mut config = valid_config();
+        config["freqai"]["feature_parameters"]["indicator_periods_candles"] = serde_json::json!([]);
+        assert!(validate_local_training_config(&config, VALID_TIMERANGE, VALID_TIMEFRAME).is_err());
+    }
+
+    #[test]
+    fn rejects_a_config_missing_include_shifted_candles() {
+        let mut config = valid_config();
+        config["freqai"]["feature_parameters"].as_object_mut().unwrap().remove("include_shifted_candles");
+        let err = validate_local_training_config(&config, VALID_TIMERANGE, VALID_TIMEFRAME).unwrap_err();
+        assert!(err.contains("include_shifted_candles"), "error should name the missing key, got: {err}");
+    }
+
+    #[test]
+    fn rejects_a_config_missing_buffer_train_data_candles() {
+        let mut config = valid_config();
+        config["freqai"]["feature_parameters"].as_object_mut().unwrap().remove("buffer_train_data_candles");
+        let err = validate_local_training_config(&config, VALID_TIMERANGE, VALID_TIMEFRAME).unwrap_err();
+        assert!(err.contains("buffer_train_data_candles"), "error should name the missing key, got: {err}");
+    }
+
+    #[test]
+    fn rejects_a_config_missing_shuffle_after_split() {
+        // Regression coverage: `feat_dict["shuffle_after_split"]` in
+        // freqtrade's data_kitchen.py is a raw subscript directly on the
+        // feature_parameters dict (not a copy with merged defaults) — a
+        // missing key here is a bare KeyError too.
+        let mut config = valid_config();
+        config["freqai"]["feature_parameters"].as_object_mut().unwrap().remove("shuffle_after_split");
+        let err = validate_local_training_config(&config, VALID_TIMERANGE, VALID_TIMEFRAME).unwrap_err();
+        assert!(err.contains("shuffle_after_split"), "error should name the missing key, got: {err}");
     }
 }
 
