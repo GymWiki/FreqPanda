@@ -92,14 +92,15 @@ async fn train_local_model(
     // pair universe to freqtrade's own VolumePairList (top-N USDT markets by
     // 24h volume, N chosen by the user via the slider — see
     // AUTO_PAIRLIST_SIZE_RANGE in lib/hetzner.ts for the same clamp applied
-    // here) instead of requiring the user to have typed a manual list.
+    // here) instead of requiring the user to have typed a manual list. This
+    // file's own config.json, though, NEVER declares VolumePairList — see
+    // build_local_training_config's doc comment (checklist item 1) for why.
+    // Auto-select here just means resolving a concrete top-N list, fresh
+    // per data-source attempt below (ranking can differ per exchange), via
+    // resolve_auto_select_pairs.
     let clamped_pair_count = auto_select_pair_count.clamp(10, 200);
-    // FreqAI's own JSON schema requires feature_parameters.include_corr_pairlist
-    // (alongside include_timeframes) — must stay in sync with
-    // DEFAULT_CORR_PAIRLIST in lib/hetzner.ts, the same fix applied there
-    // after cloud training failed with "'include_corr_pairlist' is a
-    // required property". BTC/USDT is the fixed platform-wide default.
     const CORR_PAIR: &str = "BTC/USDT";
+    const BASE_TIMEFRAME: &str = "5m";
 
     // FreqAI backtesting (which is what actually trains a model — see the
     // module doc above) refuses to start without an explicit --timerange:
@@ -140,28 +141,15 @@ async fn train_local_model(
     const DATA_SOURCE_EXCHANGES: [&str; 2] = [DATA_SOURCE_EXCHANGE, DATA_SOURCE_EXCHANGE_FALLBACK];
     let _ = &exchange_name;
 
-    // static_download_pairs is Some(...) only for manual mode, where the
-    // pairs to download are already a concrete list and don't depend on
-    // which data source ends up succeeding. Auto-select mode instead
-    // resolves a concrete list fresh per data-source attempt inside the
-    // retry loop below, via resolve_auto_select_pairs — see that
-    // function's own doc comment for why pair_whitelist_value staying a
-    // ".*/USDT" wildcard here is fine (it's what freqtrade's VolumePairList
-    // itself needs to expand against, for ongoing trade-time re-ranking)
-    // even though the actual `download-data --pairs` argument must never
-    // be that wildcard.
-    let (pair_whitelist_value, pairlists_value, static_download_pairs) = if auto_select_coins {
-        (
-            serde_json::json!([".*/USDT"]),
-            serde_json::json!([{
-                "method": "VolumePairList",
-                "number_assets": clamped_pair_count,
-                "sort_key": "quoteVolume",
-                "min_value": 0,
-                "refresh_period": 1800,
-            }]),
-            None,
-        )
+    // manual_pairs is Some(...) only for manual mode, where the *trading*
+    // pairs (never including CORR_PAIR — see the download-pairs union
+    // below) are already a concrete list the user typed, identical across
+    // every data-source attempt. None for auto-select, which resolves a
+    // concrete list fresh per attempt inside the retry loop below (see
+    // resolve_auto_select_pairs) — never a wildcard, ever, anywhere in
+    // this function; see build_local_training_config's doc comment.
+    let manual_pairs: Option<Vec<String>> = if auto_select_coins {
+        None
     } else {
         let pairs: Vec<String> = pair_whitelist
             .split(',')
@@ -171,44 +159,24 @@ async fn train_local_model(
         if pairs.is_empty() {
             return Err("pairWhitelist must contain at least one pair when auto-select is off".into());
         }
-        // download-data needs BTC/USDT's own OHLCV history too — every
-        // strategy preset implements feature_engineering_expand_all/_basic,
-        // so FreqAI really does build correlation features from
-        // include_corr_pairlist, but downloading only happens for
-        // config["pairs"] (== exchange.pair_whitelist here), which is just
-        // the user's own manually chosen trading pairs and has no reason to
-        // include BTC/USDT. Passed via an explicit --pairs override below so
-        // this never adds BTC/USDT to pair_whitelist/pairlists itself (i.e.
-        // never makes the bot actually trade it unrequested) — just what
-        // gets downloaded.
-        let mut download_pairs = pairs.clone();
-        if !download_pairs.iter().any(|p| p == CORR_PAIR) {
-            download_pairs.push(CORR_PAIR.to_string());
-        }
-        (
-            serde_json::json!(pairs),
-            serde_json::json!([{ "method": "StaticPairList" }]),
-            Some(download_pairs),
-        )
+        Some(pairs)
     };
 
-    // Concrete top-N pairlist enforcement (never the ".*/USDT" wildcard —
-    // see resolve_auto_select_pairs' own doc comment for why that wildcard
-    // breaks download-data) only actually happens the moment a download
-    // genuinely runs. run_freqtrade_step_resumable's container-name
-    // resumability keys purely on bot_id+step, so on its own it can't tell
-    // "this bot's download already finished — for this same request"
-    // apart from "already finished, for a DIFFERENT top-N count or manual
-    // pairlist picked after that". Without this check, moving the pair-
-    // count slider (or editing the manual list) and clicking Train again
-    // would silently reattach/skip into the *previous* selection's
-    // container forever — the exact regression this comment is guarding
-    // against. download_identity captures what download-data is actually
-    // being asked to fetch this call; comparing it against the marker
-    // written after the last successful download (below) is what makes
-    // that enforcement hold on a resumed/reattached run too, not just a
-    // bot's very first training run.
-    let download_identity = compute_download_identity(&static_download_pairs, clamped_pair_count, &timerange);
+    // Concrete top-N pairlist enforcement only actually happens the moment
+    // a download genuinely runs. run_freqtrade_step_resumable's
+    // container-name resumability keys purely on bot_id+step, so on its
+    // own it can't tell "this bot's download already finished — for this
+    // same request" apart from "already finished, for a DIFFERENT top-N
+    // count or manual pairlist picked after that". Without this check,
+    // moving the pair-count slider (or editing the manual list) and
+    // clicking Train again would silently reattach/skip into the
+    // *previous* selection's container forever — the exact regression
+    // this comment is guarding against. download_identity captures what
+    // download-data is actually being asked to fetch this call; comparing
+    // it against the marker written after the last successful download
+    // (below) is what makes that enforcement hold on a resumed/reattached
+    // run too, not just a bot's very first training run.
+    let download_identity = compute_download_identity(&manual_pairs, clamped_pair_count, &timerange);
     let download_identity_path = user_data_dir.join(".download-identity");
     let previous_download_identity = std::fs::read_to_string(&download_identity_path).ok();
     if previous_download_identity.as_deref() != Some(download_identity.as_str()) {
@@ -220,82 +188,38 @@ async fn train_local_model(
         remove_container(&download_container).await;
     }
 
-    // entry_pricing/exit_pricing and max_open_trades are both required by
-    // freqtrade but have no schema-level default it could silently fill in
-    // for a missing key — omitting either is a bare crash, not a graceful
-    // validation error (entry_pricing/exit_pricing: freqtrade's own
-    // Exchange.validate_config, in freqtrade/exchange/exchange.py, does a
-    // raw `config["exit_pricing"]`/`config["entry_pricing"]` dict subscript
-    // unconditionally in its own __init__, so a missing key surfaces as a
-    // raw Python KeyError rather than a readable message). Must stay in
-    // sync with the identically-named/valued PRICE_DISCOVERY_CONFIG /
-    // DEFAULT_MAX_OPEN_TRADES in lib/hetzner.ts — that file's own doc
-    // comments there have the full citations. Checked on every call by
-    // validate_local_training_config below specifically so a future
-    // refactor of this config block can't silently drop one of these
-    // again — see that function's own doc comment for why it exists at
-    // all.
-    let config = serde_json::json!({
-        "stake_currency": "USDT",
-        "stake_amount": "unlimited",
-        "dry_run": true,
-        "trading_mode": "spot",
-        "max_open_trades": 5,
-        "exchange": {
-            // Starting value only — rewritten before each download-data
-            // attempt below, cycling through DATA_SOURCE_EXCHANGES if the
-            // primary source fails.
-            "name": DATA_SOURCE_EXCHANGE,
-            "key": "",
-            "secret": "",
-            "pair_whitelist": pair_whitelist_value,
-            "pair_blacklist": [],
-        },
-        "pairlists": pairlists_value,
-        "entry_pricing": { "price_side": "same", "use_order_book": true, "order_book_top": 1 },
-        "exit_pricing": { "price_side": "same", "use_order_book": true, "order_book_top": 1 },
-        "freqai": {
-            "enabled": true,
-            "identifier": format!("{bot_id}-model"),
-            "train_period_days": FREQAI_TRAIN_PERIOD_DAYS,
-            "backtest_period_days": FREQAI_BACKTEST_PERIOD_DAYS,
-            "feature_parameters": { "include_timeframes": ["5m"], "include_corr_pairlist": [CORR_PAIR] },
-            "data_split_parameters": { "test_size": 0.25 }
-        }
-    });
-    validate_local_training_config(&config)?;
-
     // "--timeframes" (plural) is the only flag download-data actually
     // accepts — freqtrade's own ARGS_DOWNLOAD_DATA has no singular
     // "timeframe" entry, unlike backtesting below. Must stay in sync with
     // the same fix in lib/hetzner.ts.
     //
-    // Tries each data source in order — config.json's exchange.name is
-    // rewritten (never pair_whitelist/pairlists) before every attempt, so
-    // this can never make the bot actually trade on whichever source it
-    // happened to download candles from. Whichever config.json is left on
-    // disk after this loop (the one from the successful attempt) is what
-    // backtesting below actually trains against.
+    // Tries each data source in order. Every attempt resolves its own
+    // trading_pairs, builds the FULL config via build_local_training_config
+    // (never a partial rewrite of a previously-written config — see that
+    // function's own doc comment for the whole checklist this enforces),
+    // validates it, and only then writes it to disk — so config.json is
+    // NEVER in a state download-data or backtesting could run against
+    // except this one, fully-checked shape. Whichever attempt's config.json
+    // is left on disk after this loop (the one that actually downloaded
+    // successfully) is what backtesting below trains against, built from
+    // the exact same trading_pairs value that attempt's download used —
+    // see the download_pairs union just below for why that pairing can
+    // never drift apart.
     let mut download_ok = false;
     let mut last_download_err = String::new();
     for data_source in DATA_SOURCE_EXCHANGES {
         emit_status(&app, &bot_id, format!("=== download-data: trying data source '{data_source}' ==="));
-        let mut source_config = config.clone();
-        source_config["exchange"]["name"] = serde_json::json!(data_source);
-        let source_config_json = serde_json::to_vec_pretty(&source_config).map_err(|e| e.to_string())?;
-        std::fs::write(user_data_dir.join("config.json"), source_config_json)
-            .map_err(|e| format!("could not write config.json: {e}"))?;
 
-        // Resolve the CONCRETE list of pairs to download. static_download_pairs
-        // (manual mode) never depends on the data source; auto-select mode
-        // resolves fresh per attempt via test-pairlist, since the whole
-        // point is downloading exactly what VolumePairList would currently
-        // rank top-N on *this* data source — never the ".*/USDT" wildcard
-        // that config's own pair_whitelist uses for its own, separate
-        // trade-time re-ranking (see resolve_auto_select_pairs).
-        let download_data_pairs = match &static_download_pairs {
+        // The CONCRETE list of pairs this bot will actually trade/backtest
+        // — never a wildcard, never resolved via a config that declares
+        // VolumePairList (see build_local_training_config's checklist item
+        // 1). manual_pairs never depends on the data source; auto-select
+        // resolves fresh per attempt, since the whole point is matching
+        // exactly what VolumePairList would currently rank top-N on *this*
+        // data source.
+        let trading_pairs = match &manual_pairs {
             Some(pairs) => pairs.clone(),
-            None => match resolve_auto_select_pairs(&app, &bot_id, &work_dir, CORR_PAIR).await {
+            None => match resolve_auto_select_pairs(&app, &bot_id, &work_dir, data_source, clamped_pair_count).await {
                 Ok(pairs) => pairs,
                 Err(e) => {
                     last_download_err = format!("could not resolve top-{clamped_pair_count} pairlist via test-pairlist: {e}");
@@ -303,14 +227,43 @@ async fn train_local_model(
                 }
             },
         };
+
+        // download-data needs CORR_PAIR's own OHLCV history too — every
+        // strategy preset implements feature_engineering_expand_all/_basic,
+        // so FreqAI really does build correlation features from
+        // include_corr_pairlist, but downloading only happens for whatever
+        // --pairs lists explicitly. Unioned in for downloading purposes
+        // only: config.json's own pair_whitelist (below) stays exactly
+        // trading_pairs, so this never makes the bot actually trade
+        // CORR_PAIR unrequested — FreqAI reads its candles separately, via
+        // include_corr_pairlist, not through the main whitelist.
+        let mut download_pairs = trading_pairs.clone();
+        if !download_pairs.iter().any(|p| p == CORR_PAIR) {
+            download_pairs.push(CORR_PAIR.to_string());
+        }
+
+        let config = build_local_training_config(&LocalTrainingConfigParams {
+            bot_id: &bot_id,
+            data_source,
+            pair_whitelist: &trading_pairs,
+            corr_pair: CORR_PAIR,
+            base_timeframe: BASE_TIMEFRAME,
+            train_period_days: FREQAI_TRAIN_PERIOD_DAYS,
+            backtest_period_days: FREQAI_BACKTEST_PERIOD_DAYS,
+        });
+        validate_local_training_config(&config, &timerange, BASE_TIMEFRAME)?;
+        let config_json = serde_json::to_vec_pretty(&config).map_err(|e| e.to_string())?;
+        std::fs::write(user_data_dir.join("config.json"), config_json)
+            .map_err(|e| format!("could not write config.json: {e}"))?;
+
         emit_status(
             &app,
             &bot_id,
             format!(
                 "=== about to download {} pairs (requested top {}): {} ===",
-                download_data_pairs.len(),
+                download_pairs.len(),
                 clamped_pair_count,
-                download_data_pairs.join(", "),
+                download_pairs.join(", "),
             ),
         );
 
@@ -319,12 +272,12 @@ async fn train_local_model(
             "--config",
             "user_data/config.json",
             "--timeframes",
-            "5m",
+            BASE_TIMEFRAME,
             "--timerange",
             &timerange,
             "--pairs",
         ];
-        download_data_args.extend(download_data_pairs.iter().map(|p| p.as_str()));
+        download_data_args.extend(download_pairs.iter().map(|p| p.as_str()));
         match run_freqtrade_step_resumable(&app, &bot_id, &work_dir, &download_container, &download_data_args).await {
             Ok(()) => {
                 download_ok = true;
@@ -416,29 +369,119 @@ fn training_container_name(bot_id: &str, step: &str) -> String {
     format!("freqpanda-train-{bot_id}-{step}")
 }
 
-// This app now generates a freqtrade config.json from two independent
-// places — this file (Rust, for local Tauri training) and lib/hetzner.ts
-// (TypeScript, for VPS deploy) — because the two run in genuinely
-// different languages/processes; there's no way to share one literal
-// generator between them. That split is exactly how a required key has
-// already silently gone missing from just one side once before:
-// entry_pricing/exit_pricing (and separately, max_open_trades) were added
-// to lib/hetzner.ts's config generation after freqtrade backtesting
-// crashed with `KeyError: 'exit_pricing'`, but that fix was never ported
-// over here — this file's own config never had them — so the exact same
-// crash resurfaced the moment local training's config actually reached
-// backtesting (the --timerange fix upstream of this one meant backtesting
-// finally started running instead of erroring out earlier). Since the two
-// generators can't be merged, this function is the structural guard
-// instead: called on every config this file builds, right after building
-// it, so a future edit to the config block above that drops one of these
-// again fails loudly and immediately — a clear Rust-level error before
-// Docker is ever spawned — rather than as a cryptic Python KeyError deep
-// in a container's logs. Keep this list in sync with whatever
-// lib/hetzner.ts's own required-field comments (PRICE_DISCOVERY_CONFIG,
-// DEFAULT_MAX_OPEN_TRADES, and the freqai schema comment near
-// include_corr_pairlist) document as required there.
-fn validate_local_training_config(config: &serde_json::Value) -> Result<(), String> {
+// ============================================================================
+// THE central freqtrade config.json generator for LOCAL TRAINING.
+//
+// This app generates a freqtrade config.json from two independent places —
+// this file (Rust, for local Tauri training/backtesting) and
+// lib/hetzner.ts (TypeScript, for VPS live/paper-trading deploy) — because
+// the two run in genuinely different languages/processes; there is no way
+// to share one literal generator between them. Within THIS file, though,
+// there is exactly one: every call site that needs a config.json for
+// local training calls build_local_training_config below — nothing else
+// in this file constructs one by hand. That single-generator rule is what
+// makes the checklist below actually enforceable: validate_local_training_
+// config runs on every config this function's caller builds, so a future
+// edit can't silently drop a requirement without a build-time... no, a
+// *run*-time failure, immediately, before Docker is ever spawned.
+//
+// This checklist exists because FOUR separate freqtrade requirements have
+// each, independently, been discovered missing or wrong here and shipped
+// as regressions before this restructure — every one of them is now both
+// baked into this function AND checked by validate_local_training_config:
+//
+//   1. PAIRLIST — must be a concrete StaticPairList with a real pair list,
+//      NEVER VolumePairList and NEVER a ".*/USDT" wildcard. freqtrade's
+//      Pairlist Handlers explicitly refuse VolumePairList under
+//      backtesting ("Pairlist Handlers VolumePairList do not support
+//      backtesting") — it's a live-market-data pairlist, backtesting needs
+//      a pre-known fixed list. Callers MUST resolve a concrete list
+//      themselves before calling this function (see
+//      resolve_auto_select_pairs for the auto-select case, which uses
+//      VolumePairList only in a throwaway probe config that never reaches
+//      this function or Docker) — this function only accepts already-
+//      concrete pairs via `params.pair_whitelist`, it never resolves them.
+//   2. freqai.feature_parameters.include_corr_pairlist — required by
+//      FreqAI's own JSON schema whenever freqai.enabled is true.
+//   3. entry_pricing / exit_pricing — freqtrade's Exchange.validate_config
+//      does a raw `config["exit_pricing"]`/`config["entry_pricing"]` dict
+//      subscript with no schema default, so a missing key crashes with a
+//      bare KeyError rather than a readable validation error.
+//   4. --timerange (a CLI arg passed to download-data/backtesting, not
+//      part of this JSON, but validated alongside it — see
+//      validate_local_training_config) — FreqAI backtesting refuses to
+//      run without one.
+//
+// Keep this in sync with whatever lib/hetzner.ts's own required-field
+// comments (PRICE_DISCOVERY_CONFIG, DEFAULT_MAX_OPEN_TRADES, buildPairlistConfig,
+// and the freqai schema comment near include_corr_pairlist) document as
+// required there — that file cross-references back here for the same
+// reason.
+struct LocalTrainingConfigParams<'a> {
+    bot_id: &'a str,
+    data_source: &'a str,
+    /// Requirement 1: MUST already be concrete — never a wildcard/regex,
+    /// never sourced from a config that declared VolumePairList.
+    pair_whitelist: &'a [String],
+    corr_pair: &'a str,
+    base_timeframe: &'a str,
+    train_period_days: i64,
+    backtest_period_days: i64,
+}
+
+fn build_local_training_config(params: &LocalTrainingConfigParams) -> serde_json::Value {
+    serde_json::json!({
+        "stake_currency": "USDT",
+        "stake_amount": "unlimited",
+        "dry_run": true,
+        "trading_mode": "spot",
+        // freqtrade's SCHEMA_TRADE_REQUIRED lists this as required, with
+        // no schema-level default — see lib/hetzner.ts's
+        // DEFAULT_MAX_OPEN_TRADES, kept in sync.
+        "max_open_trades": 5,
+        "exchange": {
+            "name": params.data_source,
+            "key": "",
+            "secret": "",
+            // ===== Requirement 1: PAIRLIST =====
+            // Concrete list only — see this function's own doc comment.
+            "pair_whitelist": params.pair_whitelist,
+            "pair_blacklist": [],
+        },
+        // ===== Requirement 1: PAIRLIST (continued) =====
+        // StaticPairList, always — never VolumePairList, which freqtrade
+        // itself refuses under backtesting.
+        "pairlists": [{ "method": "StaticPairList" }],
+        // ===== Requirement 3: entry_pricing / exit_pricing =====
+        "entry_pricing": { "price_side": "same", "use_order_book": true, "order_book_top": 1 },
+        "exit_pricing": { "price_side": "same", "use_order_book": true, "order_book_top": 1 },
+        "freqai": {
+            "enabled": true,
+            "identifier": format!("{}-model", params.bot_id),
+            "train_period_days": params.train_period_days,
+            "backtest_period_days": params.backtest_period_days,
+            "feature_parameters": {
+                // ===== Requirement: timeframes consistent with download =====
+                "include_timeframes": [params.base_timeframe],
+                // ===== Requirement 2: include_corr_pairlist =====
+                "include_corr_pairlist": [params.corr_pair],
+            },
+            "data_split_parameters": { "test_size": 0.25 }
+        }
+    })
+}
+
+// Self-validation for every config build_local_training_config produces —
+// see that function's own doc comment for the full checklist and why this
+// exists. Called on every attempt, right after building the config and
+// before it's ever written to disk or handed to Docker, so a violation is
+// a clear Rust-level error instead of a cryptic Python crash (or, worse,
+// a silent wrong-pairlist run) deep in a container's logs. timerange and
+// download_timeframe are passed alongside config because requirement 4
+// (--timerange) is a CLI arg, not a JSON field, and the timeframe
+// consistency check needs to compare against what download-data was
+// actually told to fetch.
+fn validate_local_training_config(config: &serde_json::Value, timerange: &str, download_timeframe: &str) -> Result<(), String> {
     const REQUIRED_TOP_LEVEL_KEYS: &[&str] = &[
         "stake_currency",
         "stake_amount",
@@ -454,19 +497,48 @@ fn validate_local_training_config(config: &serde_json::Value) -> Result<(), Stri
     for key in REQUIRED_TOP_LEVEL_KEYS {
         if config.get(key).is_none() {
             return Err(format!(
-                "generated config.json is missing required key '{key}' — this is a bug in train_local_model's config generation, not a Docker/network problem"
+                "generated config.json is missing required key '{key}' — this is a bug in build_local_training_config, not a Docker/network problem"
             ));
         }
     }
+
+    // ===== Requirement 1: PAIRLIST =====
+    let pairlist_method = config.get("pairlists").and_then(|p| p.get(0)).and_then(|p| p.get("method")).and_then(|m| m.as_str());
+    if pairlist_method != Some("StaticPairList") {
+        return Err(format!(
+            "generated config.json's pairlists[0].method is {pairlist_method:?}, expected \"StaticPairList\" — freqtrade's Pairlist Handlers do not support VolumePairList under backtesting"
+        ));
+    }
+    let pair_whitelist = config.get("exchange").and_then(|e| e.get("pair_whitelist")).and_then(|w| w.as_array());
+    match pair_whitelist {
+        None => return Err("generated config.json is missing exchange.pair_whitelist".into()),
+        Some(pairs) if pairs.is_empty() => {
+            return Err("generated config.json's exchange.pair_whitelist is empty — StaticPairList needs at least 1 concrete pair".into());
+        }
+        Some(pairs) => {
+            for pair in pairs {
+                let pair_str = pair.as_str().unwrap_or("");
+                if pair_str.is_empty() || pair_str.contains('*') || !pair_str.contains('/') {
+                    return Err(format!(
+                        "generated config.json's exchange.pair_whitelist contains {pair:?}, which isn't a concrete \"BASE/QUOTE\" pair — looks like a wildcard/regex leaked in"
+                    ));
+                }
+            }
+        }
+    }
+
+    // ===== Requirement 3: entry_pricing / exit_pricing =====
     for pricing_key in ["entry_pricing", "exit_pricing"] {
-        let price_side_present = config
-            .get(pricing_key)
-            .and_then(|v| v.get("price_side"))
-            .is_some();
-        if !price_side_present {
+        let pricing_value = config.get(pricing_key);
+        if !matches!(pricing_value, Some(v) if v.is_object()) {
+            return Err(format!("generated config.json's '{pricing_key}' is missing or not an object"));
+        }
+        if pricing_value.and_then(|v| v.get("price_side")).is_none() {
             return Err(format!("generated config.json's '{pricing_key}' is missing 'price_side'"));
         }
     }
+
+    // ===== Requirement 2: include_corr_pairlist =====
     let has_corr_pairlist = config
         .get("freqai")
         .and_then(|f| f.get("feature_parameters"))
@@ -475,45 +547,88 @@ fn validate_local_training_config(config: &serde_json::Value) -> Result<(), Stri
     if !has_corr_pairlist {
         return Err("generated config.json is missing freqai.feature_parameters.include_corr_pairlist".into());
     }
+
+    // ===== Requirement: timeframes consistent with what's downloaded =====
+    let declares_download_timeframe = config
+        .get("freqai")
+        .and_then(|f| f.get("feature_parameters"))
+        .and_then(|f| f.get("include_timeframes"))
+        .and_then(|v| v.as_array())
+        .is_some_and(|timeframes| timeframes.iter().any(|t| t.as_str() == Some(download_timeframe)));
+    if !declares_download_timeframe {
+        return Err(format!(
+            "generated config.json's freqai.feature_parameters.include_timeframes does not include '{download_timeframe}', the timeframe download-data is actually told to fetch"
+        ));
+    }
+
+    // ===== Requirement 4: --timerange =====
+    if timerange.trim().is_empty() {
+        return Err("timerange must not be empty — FreqAI backtesting refuses to run without --timerange".into());
+    }
+
     Ok(())
 }
 
 #[cfg(test)]
 mod local_training_config_tests {
-    use super::validate_local_training_config;
+    use super::{build_local_training_config, validate_local_training_config, LocalTrainingConfigParams};
+
+    const VALID_TIMERANGE: &str = "20260101-20260601";
+    const VALID_TIMEFRAME: &str = "5m";
 
     fn valid_config() -> serde_json::Value {
-        serde_json::json!({
-            "stake_currency": "USDT",
-            "stake_amount": "unlimited",
-            "dry_run": true,
-            "trading_mode": "spot",
-            "max_open_trades": 5,
-            "exchange": { "name": "okx", "pair_whitelist": [], "pair_blacklist": [] },
-            "pairlists": [{ "method": "StaticPairList" }],
-            "entry_pricing": { "price_side": "same", "use_order_book": true, "order_book_top": 1 },
-            "exit_pricing": { "price_side": "same", "use_order_book": true, "order_book_top": 1 },
-            "freqai": {
-                "enabled": true,
-                "feature_parameters": { "include_timeframes": ["5m"], "include_corr_pairlist": ["BTC/USDT"] },
-            },
+        build_local_training_config(&LocalTrainingConfigParams {
+            bot_id: "bot-1",
+            data_source: "okx",
+            pair_whitelist: &["BTC/USDT".to_string(), "ETH/USDT".to_string()],
+            corr_pair: "BTC/USDT",
+            base_timeframe: VALID_TIMEFRAME,
+            train_period_days: 30,
+            backtest_period_days: 7,
         })
     }
 
     #[test]
-    fn accepts_a_complete_config() {
-        assert!(validate_local_training_config(&valid_config()).is_ok());
+    fn build_local_training_config_passes_its_own_validation() {
+        // The actual generator, exercised end-to-end against its own
+        // validator — the strongest guarantee this checklist stays true:
+        // if a future edit to build_local_training_config drops a
+        // required field, THIS test fails, not just a hand-written fixture.
+        assert!(validate_local_training_config(&valid_config(), VALID_TIMERANGE, VALID_TIMEFRAME).is_ok());
+    }
+
+    #[test]
+    fn rejects_volume_pair_list() {
+        // Regression coverage for the actual bug this validator exists to
+        // catch: freqtrade flatly refuses VolumePairList under
+        // backtesting ("Pairlist Handlers VolumePairList do not support
+        // backtesting") — this must never reach `docker run` again.
+        let mut config = valid_config();
+        config["pairlists"] = serde_json::json!([{ "method": "VolumePairList", "number_assets": 20 }]);
+        let err = validate_local_training_config(&config, VALID_TIMERANGE, VALID_TIMEFRAME).unwrap_err();
+        assert!(err.contains("VolumePairList") || err.contains("StaticPairList"), "error should name the pairlist problem, got: {err}");
+    }
+
+    #[test]
+    fn rejects_a_wildcard_pair_whitelist() {
+        let mut config = valid_config();
+        config["exchange"]["pair_whitelist"] = serde_json::json!([".*/USDT"]);
+        let err = validate_local_training_config(&config, VALID_TIMERANGE, VALID_TIMEFRAME).unwrap_err();
+        assert!(err.contains("pair_whitelist"), "error should name the field, got: {err}");
+    }
+
+    #[test]
+    fn rejects_an_empty_pair_whitelist() {
+        let mut config = valid_config();
+        config["exchange"]["pair_whitelist"] = serde_json::json!([]);
+        assert!(validate_local_training_config(&config, VALID_TIMERANGE, VALID_TIMEFRAME).is_err());
     }
 
     #[test]
     fn rejects_a_config_missing_exit_pricing() {
-        // Regression coverage for the actual bug this validator exists to
-        // catch: freqtrade's Exchange.validate_config crashes with a raw
-        // KeyError on a missing exit_pricing (see this function's own doc
-        // comment) — this must never reach `docker run` again.
         let mut config = valid_config();
         config.as_object_mut().unwrap().remove("exit_pricing");
-        let err = validate_local_training_config(&config).unwrap_err();
+        let err = validate_local_training_config(&config, VALID_TIMERANGE, VALID_TIMEFRAME).unwrap_err();
         assert!(err.contains("exit_pricing"), "error should name the missing key, got: {err}");
     }
 
@@ -521,22 +636,36 @@ mod local_training_config_tests {
     fn rejects_a_config_missing_entry_pricing() {
         let mut config = valid_config();
         config.as_object_mut().unwrap().remove("entry_pricing");
-        assert!(validate_local_training_config(&config).is_err());
+        assert!(validate_local_training_config(&config, VALID_TIMERANGE, VALID_TIMEFRAME).is_err());
     }
 
     #[test]
     fn rejects_a_config_missing_max_open_trades() {
         let mut config = valid_config();
         config.as_object_mut().unwrap().remove("max_open_trades");
-        assert!(validate_local_training_config(&config).is_err());
+        assert!(validate_local_training_config(&config, VALID_TIMERANGE, VALID_TIMEFRAME).is_err());
     }
 
     #[test]
     fn rejects_a_config_missing_include_corr_pairlist() {
         let mut config = valid_config();
         config["freqai"]["feature_parameters"].as_object_mut().unwrap().remove("include_corr_pairlist");
-        let err = validate_local_training_config(&config).unwrap_err();
+        let err = validate_local_training_config(&config, VALID_TIMERANGE, VALID_TIMEFRAME).unwrap_err();
         assert!(err.contains("include_corr_pairlist"), "error should name the missing key, got: {err}");
+    }
+
+    #[test]
+    fn rejects_an_empty_timerange() {
+        let err = validate_local_training_config(&valid_config(), "", VALID_TIMEFRAME).unwrap_err();
+        assert!(err.contains("timerange"), "error should name timerange, got: {err}");
+    }
+
+    #[test]
+    fn rejects_a_timeframe_not_downloaded() {
+        // The config declares "5m" but download-data was (hypothetically)
+        // told to fetch "1h" instead — these must never disagree.
+        let err = validate_local_training_config(&valid_config(), VALID_TIMERANGE, "1h").unwrap_err();
+        assert!(err.contains("include_timeframes"), "error should name the field, got: {err}");
     }
 }
 
@@ -939,37 +1068,73 @@ fn launch_downloaded_installer(path: &Path) -> Result<(), String> {
     }
 }
 
-// Auto-select's config.json carries a ".*/USDT" wildcard as pair_whitelist
-// with a VolumePairList pairlists entry — freqtrade expands that live at
-// trade/backtest time against whatever's currently top-N by volume, which
-// is exactly the dynamic re-ranking auto-select is for. But `download-data
-// --pairs .*/USDT` interprets that same wildcard as a *regex*, matching
-// every USDT market the exchange lists — not the N the user actually
-// chose. This resolves the wildcard to the same concrete list freqtrade's
-// own VolumePairList would currently pick, via freqtrade's own
-// `test-pairlist --print-json` (queries the exchange for live volume data,
-// prints exactly the resolved pairs and nothing else to stdout — its own
-// INFO/WARNING logging goes to stderr), the same mechanism this codebase's
+// A throwaway probe config, written ONLY so freqtrade's own `test-pairlist`
+// can resolve VolumePairList's live top-N-by-volume ranking — see
+// resolve_auto_select_pairs below. This declares VolumePairList
+// deliberately (that's the whole point: reuse freqtrade's own ranking
+// algorithm exactly, rather than reimplementing an exchange's quoteVolume
+// sort in Rust) but MUST NEVER be the config download-data or backtesting
+// run against — see build_local_training_config's doc comment, checklist
+// item 1, for why VolumePairList crashes backtesting outright. The caller
+// (the data-source retry loop in train_local_model) always overwrites
+// user_data/config.json with the real build_local_training_config output
+// immediately after resolve_auto_select_pairs returns, before download-data
+// or backtesting ever run — so there is no window where this probe config
+// could leak into either of those steps.
+fn build_pairlist_probe_config(data_source: &str, pair_count: u32) -> serde_json::Value {
+    serde_json::json!({
+        "stake_currency": "USDT",
+        "stake_amount": "unlimited",
+        "dry_run": true,
+        "trading_mode": "spot",
+        "exchange": {
+            "name": data_source,
+            "key": "",
+            "secret": "",
+            "pair_whitelist": [".*/USDT"],
+            "pair_blacklist": [],
+        },
+        "pairlists": [{
+            "method": "VolumePairList",
+            "number_assets": pair_count,
+            "sort_key": "quoteVolume",
+            "min_value": 0,
+            "refresh_period": 1800,
+        }],
+    })
+}
+
+// Resolves the concrete top-`pair_count` pairs by volume on `data_source`,
+// via freqtrade's own `test-pairlist --print-json` (queries the exchange
+// for live volume data, prints exactly the resolved pairs and nothing else
+// to stdout — its own INFO/WARNING logging goes to stderr) run against the
+// throwaway probe config above — the same mechanism this codebase's
 // now-removed permanent data-server refresh script used for the identical
-// problem. BTC/USDT is unioned in for downloading purposes only — every
-// FreqAI preset needs it for correlation features (include_corr_pairlist)
-// even on a run where it wouldn't otherwise rank in the top pairs by
-// volume — this never adds it to the bot's actual trading whitelist,
-// which stays whatever VolumePairList itself resolves at trade time.
+// problem. Returns the bare trading pairs only — CORR_PAIR is NOT unioned
+// in here; the caller does that itself for the download-only pairs list,
+// keeping this function's return value exactly what becomes
+// config.json's pair_whitelist (see build_local_training_config).
 async fn resolve_auto_select_pairs(
     app: &AppHandle,
     bot_id: &str,
     work_dir: &Path,
-    corr_pair: &str,
+    data_source: &str,
+    pair_count: u32,
 ) -> Result<Vec<String>, String> {
-    emit_status(app, bot_id, "=== resolving the current top-N pairlist by volume (test-pairlist) ===");
+    emit_status(app, bot_id, format!("=== resolving the current top-{pair_count} pairlist by volume on '{data_source}' (test-pairlist) ==="));
+
+    let user_data_dir = work_dir.join("user_data");
+    let probe_config = build_pairlist_probe_config(data_source, pair_count);
+    let probe_config_json = serde_json::to_vec_pretty(&probe_config).map_err(|e| e.to_string())?;
+    std::fs::write(user_data_dir.join("config.json"), probe_config_json)
+        .map_err(|e| format!("could not write probe config.json: {e}"))?;
 
     let mut cmd = Command::new("docker");
     cmd.args([
         "run",
         "--rm",
         "-v",
-        &format!("{}:/freqtrade/user_data", work_dir.join("user_data").display()),
+        &format!("{}:/freqtrade/user_data", user_data_dir.display()),
         FREQTRADE_DOCKER_IMAGE,
         "test-pairlist",
         "--config",
@@ -987,13 +1152,10 @@ async fn resolve_auto_select_pairs(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut pairs: Vec<String> = serde_json::from_str(stdout.trim())
+    let pairs: Vec<String> = serde_json::from_str(stdout.trim())
         .map_err(|e| format!("could not parse test-pairlist output as JSON ({e}): {}", stdout.trim()))?;
     if pairs.is_empty() {
         return Err("test-pairlist resolved an empty pairlist".into());
-    }
-    if !pairs.iter().any(|p| p == corr_pair) {
-        pairs.push(corr_pair.to_string());
     }
     Ok(pairs)
 }
