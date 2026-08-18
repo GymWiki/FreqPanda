@@ -299,6 +299,34 @@ async fn train_local_model(
     // run treats this one as stale and redownloads, never the reverse.
     let _ = std::fs::write(&download_identity_path, &download_identity);
 
+    // Guard against a leftover exited backtest container masking a fresh
+    // training request. run_freqtrade_step_resumable's resumability keys
+    // purely on bot_id+step (ContainerState::ExitedOk => skip, see its own
+    // doc comment) — it can't tell "this bot's backtest already finished
+    // successfully with a model to show for it" apart from "this bot's
+    // backtest exited 0 but produced nothing", which is exactly what
+    // freqtrade's own --cache day default causes: "Reusing result of
+    // previous backtest for <strategy>" from a stale backtest_results/*.zip
+    // on the mounted volume skips the FreqAI training step entirely while
+    // still exiting successfully. Without this, a plain "Train" click
+    // (force_retrain=false) would reattach to that already-exited container
+    // forever and repeat the same empty result on every click. If there's
+    // no model on disk yet, treat any exited backtest container as
+    // unfinished and force a fresh run instead of skipping it.
+    let models_dir = user_data_dir.join("models");
+    let mut existing_joblib_files = Vec::new();
+    let _ = collect_joblib_files(&models_dir, &mut existing_joblib_files);
+    if existing_joblib_files.is_empty() {
+        if let ContainerState::ExitedOk = inspect_container(&backtest_container).await {
+            emit_status(
+                &app,
+                &bot_id,
+                "=== previous backtest finished without producing a model — forcing a fresh run ===",
+            );
+            remove_container(&backtest_container).await;
+        }
+    }
+
     run_freqtrade_step_resumable(
         &app,
         &bot_id,
@@ -314,11 +342,24 @@ async fn train_local_model(
             "LightGBMRegressor",
             "--timerange",
             &timerange,
+            // Explicit training is always a deliberate, user-initiated
+            // action — it must always actually retrain, never silently
+            // reuse a cached backtest result. freqtrade defaults to
+            // `--cache day`, which reuses a matching result from
+            // backtest_results/ (same strategy/config/timerange signature)
+            // within the same day and skips FreqAI training altogether,
+            // logging "Reusing result of previous backtest for <strategy>"
+            // — the process still exits 0 and prints a full report, so
+            // nothing here would otherwise notice, yet no .joblib is ever
+            // written. Do not remove this flag; see the ExitedOk guard just
+            // above for the other half of this fix (a leftover exited
+            // container from before this flag existed).
+            "--cache",
+            "none",
         ],
     )
     .await?;
 
-    let models_dir = user_data_dir.join("models");
     let mut joblib_files = Vec::new();
     collect_joblib_files(&models_dir, &mut joblib_files)?;
 
