@@ -8,6 +8,7 @@ import type { HumanizedTrade } from "@/lib/trade-humanizer";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { LifecycleBadge } from "@/components/ui/LifecycleBadge";
 import { deriveLifecycleStatus } from "@/lib/bot-lifecycle";
+import { isTauri } from "@/lib/tauri";
 import { apiFetch } from "@/lib/api-client";
 import { useDictionary } from "@/components/I18nProvider";
 
@@ -31,8 +32,39 @@ export function BotCard({ bot }: BotCardProps) {
   const dict = useDictionary();
   const [totalProfit, setTotalProfit] = useState<number | null>(null);
   const [isLoadingProfit, setIsLoadingProfit] = useState(false);
+  const [isTrainingLocally, setIsTrainingLocally] = useState(false);
 
-  const lifecycleStatus = deriveLifecycleStatus(bot, false);
+  // Regression fix: this card has no server-side signal that local training
+  // is running — bot.status is never touched during local (Docker/Tauri)
+  // training, it only changes once a trained model uploads. deriveLifecycleStatus
+  // therefore relies entirely on the isTrainingLocally flag passed in here. This
+  // used to be hardcoded to `false`, so refreshing the dashboard while a training
+  // container was still running showed "not trained"/"ready" instead of
+  // "training...". The detail page (BotDetailView) already re-checks this via
+  // the read-only local_training_status Tauri command on mount; mirror that same
+  // check here, read-only, so the compact card agrees with it after a refresh.
+  // Do not remove this without keeping some other way for the card to learn
+  // about an active local training run.
+  useEffect(() => {
+    if (!isTauri() || bot.aiModelPath) return;
+    let cancelled = false;
+    (async () => {
+      const { invoke } = await import("@tauri-apps/api/core");
+      try {
+        const status = await invoke<{ state: string }>("local_training_status", { botId: bot.id });
+        if (!cancelled) {
+          setIsTrainingLocally(status.state === "training" || status.state === "downloading");
+        }
+      } catch {
+        // Best-effort — a failed status check just leaves the badge as-is.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [bot.id, bot.aiModelPath]);
+
+  const lifecycleStatus = deriveLifecycleStatus(bot, isTrainingLocally);
 
   // Best-effort only: a quick "how's it doing" read straight from the same
   // /api/bots/[id]/trades endpoint the detail page's trade list and chart
