@@ -121,6 +121,12 @@ export const en: Dictionary = {
     intro: "Every bot trades with an AI model and starts in practice mode — you switch to real money yourself, whenever you're ready.",
     botNameLabel: "Bot name",
     botNamePlaceholder: "My first bot",
+    botTypeLabel: "What kind of bot do you want to make?",
+    botTypeFreqAI: "FreqAI (machine learning)",
+    botTypeFreqAIDescription: "An AI model learns to recognize patterns itself. Needs to be trained before it can trade.",
+    botTypeRuleBased: "Rule-based (classic indicators)",
+    botTypeRuleBasedDescription: "Fixed, well-known indicator rules (like RSI and MACD). No training needed — ready to backtest right away.",
+    ruleBasedStrategyLabel: "Which strategy should it follow?",
     aiBehaviorLabel: "How should your bot trade?",
     aiBehaviorTooltip:
       "Determines how cautious or active the AI is: how often it opens positions and how much risk it takes doing so. Can't be changed for this bot after this.",
@@ -138,6 +144,27 @@ export const en: Dictionary = {
     ariaLabel: "Choose how your bot should trade",
     riskSuffix: " risk",
     timeframePrefix: "Checks every: ",
+  },
+
+  ruleBasedPicker: {
+    ariaLabel: "Choose a rule-based strategy",
+    timeframePrefix: "Timeframe: ",
+  },
+
+  backtestResults: {
+    heading: "Backtest results",
+    disclaimer: "Past results are no guarantee of future performance.",
+    totalProfit: "Total profit",
+    winRate: "Win rate",
+    trades: "Trades",
+    maxDrawdown: "Max. drawdown",
+    runBacktest: "Run backtest",
+    rerunBacktest: "Run again",
+    running: "Downloading and backtesting…",
+    failed: "Backtest failed",
+    needsApp: "Backtesting requires the desktop app — download it from the website.",
+    noneYet: "No backtest has been run for this bot yet.",
+    winLossDraw: (wins: number, losses: number, draws: number) => `${wins}W / ${losses}L / ${draws}D`,
   },
 
   budgetSlider: {

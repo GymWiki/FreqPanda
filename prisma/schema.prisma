@@ -123,6 +123,22 @@ enum BotStatus {
   @@map("bot_status")
 }
 
+// FREQAI: the original, only-ever flow — a machine-learning model trained
+// per bot (see lib/strategy-presets.ts), gated on an uploaded .joblib
+// before it can go live. RULE_BASED: classic indicator strategies (see
+// lib/rule-based-presets.ts) with no model to train or upload — a bot of
+// this kind only ever downloads data and (optionally) backtests locally.
+// Which one a bot is chosen at creation time and never changes afterward
+// (there's no "convert" flow) — see BotConfiguration.freqaiConfig, which
+// is required for FREQAI and null for RULE_BASED (enforced by a DB check
+// constraint, see the migration that added this column).
+enum StrategyType {
+  FREQAI
+  RULE_BASED
+
+  @@map("strategy_type")
+}
+
 // A bot's own linked exchange account. One-to-one with BotConfiguration
 // (bot_id is unique below) — bots never share a connection, so each bot's
 // credentials, verification state, and blast radius (a compromised key
@@ -195,12 +211,18 @@ model BotConfiguration {
   // is deployed or trained on — without it, the container has nothing to
   // load and fails at startup.
   strategyCode  String  @map("strategy_code")
-  // Every bot runs on FreqAI — this is the structured training/feature/risk
-  // config for the chosen AI behavior (see lib/strategy-presets.ts
-  // FreqAIProfileConfig), captured at creation time so lib/hetzner.ts can
-  // build the real freqai config.json block from it on every (re)deploy or
-  // training run, rather than from generic hardcoded defaults.
-  freqaiConfig  Json    @map("freqai_config")
+  // FREQAI (the original, default flow) vs RULE_BASED (classic indicator
+  // strategies, no model — see the StrategyType enum doc above and
+  // lib/rule-based-presets.ts). Fixed at creation time.
+  strategyType StrategyType @default(FREQAI) @map("strategy_type")
+  // The structured training/feature/risk config for the chosen AI behavior
+  // (see lib/strategy-presets.ts FreqAIProfileConfig), captured at creation
+  // time so lib/hetzner.ts can build the real freqai config.json block from
+  // it on every (re)deploy or training run, rather than from generic
+  // hardcoded defaults. Only ever set when strategyType is FREQAI — null
+  // for a RULE_BASED bot, which has no AI behavior to configure (enforced
+  // by a DB check constraint, see the migration that added strategyType).
+  freqaiConfig  Json?   @map("freqai_config")
   // When true (the default), pairWhitelist is ignored and lib/hetzner.ts
   // configures freqtrade's VolumePairList instead of a static list — FreqAI
   // dynamically trades whatever the exchange's own top-liquid USDT markets

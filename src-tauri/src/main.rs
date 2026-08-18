@@ -1,6 +1,7 @@
 // Prevents an extra console window from opening on Windows in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use chrono::{Duration, Utc};
@@ -25,6 +26,23 @@ struct TrainingProgress {
 // requirements-freqai.txt). Must stay in sync with FREQTRADE_DOCKER_IMAGE
 // in lib/hetzner.ts, the same fix applied there for cloud training/deploy.
 const FREQTRADE_DOCKER_IMAGE: &str = "freqtradeorg/freqtrade:stable_freqai";
+
+// The exchange(s) local training/backtesting actually pulls candles from —
+// deliberately NOT a bot's own real trading exchange. Neither
+// train_local_model nor run_local_backtest ever touches real account
+// credentials — both only ever need public market data — so there was
+// never a reason to tie this to whichever exchange a bot eventually
+// connects to. Must stay in sync with DATA_SOURCE_EXCHANGE(S) in
+// lib/hetzner.ts — same fix, same reason: Bybit's own CloudFront
+// distribution started hard-blocking EEA IPs as part of its MiCA exit,
+// breaking training for any Bybit-connected bot regardless of anything in
+// this codebase. Binance was ruled out too — it failed to secure its own
+// MiCA licence and began suspending EU services around the same time. OKX
+// (Malta MiCA licence) and Gate.io (Malta CASP authorization) both
+// confirmed still serving the EEA normally, tried in that order below.
+const DATA_SOURCE_EXCHANGE: &str = "okx";
+const DATA_SOURCE_EXCHANGE_FALLBACK: &str = "gate";
+const DATA_SOURCE_EXCHANGES: [&str; 2] = [DATA_SOURCE_EXCHANGE, DATA_SOURCE_EXCHANGE_FALLBACK];
 
 // Mode A (local training). Spawns FreqAI via `docker run` as a child
 // process, streams its output to the frontend as `training-progress`
@@ -121,24 +139,10 @@ async fn train_local_model(
     let fmt_date = |d: chrono::NaiveDate| d.format("%Y%m%d").to_string();
     let timerange = format!("{}-{}", fmt_date(start_date), fmt_date(today));
 
-    // The exchange(s) local training actually pulls candles from —
-    // deliberately NOT `exchange_name` (the bot's own real trading
-    // exchange, still accepted here for API compatibility with the
-    // frontend invoke call but otherwise unused). This process never
-    // touches real account credentials either way (see the module doc
-    // above), so there was never a reason to tie the training data source
-    // to whichever exchange the bot trades on. Must stay in sync with
-    // DATA_SOURCE_EXCHANGE(S) in lib/hetzner.ts — same fix, same reason:
-    // Bybit's own CloudFront distribution started hard-blocking EEA IPs as
-    // part of its MiCA exit, breaking training for any Bybit-connected bot
-    // regardless of anything in this codebase. Binance was ruled out too —
-    // it failed to secure its own MiCA licence and began suspending EU
-    // services around the same time. OKX (Malta MiCA licence) and Gate.io
-    // (Malta CASP authorization) both confirmed still serving the EEA
-    // normally, tried in that order below.
-    const DATA_SOURCE_EXCHANGE: &str = "okx";
-    const DATA_SOURCE_EXCHANGE_FALLBACK: &str = "gate";
-    const DATA_SOURCE_EXCHANGES: [&str; 2] = [DATA_SOURCE_EXCHANGE, DATA_SOURCE_EXCHANGE_FALLBACK];
+    // `exchange_name` (the bot's own real trading exchange) is accepted
+    // here only for API compatibility with the frontend invoke call —
+    // DATA_SOURCE_EXCHANGES above is what's actually used, see its own doc
+    // comment for why.
     let _ = &exchange_name;
 
     // manual_pairs is Some(...) only for manual mode, where the *trading*
@@ -410,6 +414,356 @@ fn training_container_name(bot_id: &str, step: &str) -> String {
     format!("freqpanda-train-{bot_id}-{step}")
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BacktestSummary {
+    total_profit_pct: f64,
+    wins: i64,
+    losses: i64,
+    draws: i64,
+    win_rate: f64,
+    max_drawdown_pct: f64,
+}
+
+// Mode B (rule-based local backtesting) — the non-FreqAI counterpart to
+// train_local_model above. A rule-based strategy (see
+// lib/rule-based-presets.ts) has no model to train or upload, so unlike
+// train_local_model this never touches user_data/models/ and returns a
+// parsed BacktestSummary instead of a .joblib path. See
+// build_local_backtest_config's doc comment for why this needs its own,
+// much smaller config generator — no freqai section, no train/backtest
+// period split.
+//
+// Deliberately simpler than train_local_model in one more way: no
+// resumability. Both containers are unconditionally removed and re-run
+// fresh on every call — a plain backtest is fast enough (no model fitting)
+// that reasoning about "is a leftover container's result still valid" isn't
+// worth it, and it sidesteps entirely the freqtrade `--cache day` pitfall
+// that once let a stale backtest_results/*.zip silently skip real work
+// while still exiting 0 (see the "--cache none" fix on the backtesting
+// call below, and its own comment, for the full story) — this flow simply
+// never has a leftover container old enough for that to matter.
+#[tauri::command]
+async fn run_local_backtest(
+    app: AppHandle,
+    bot_id: String,
+    strategy: String,
+    strategy_code: String,
+    base_timeframe: String,
+    download_timeframes: Vec<String>,
+    auto_select_coins: bool,
+    auto_select_pair_count: u32,
+    pair_whitelist: String,
+) -> Result<BacktestSummary, String> {
+    if !is_safe_python_identifier(&strategy) {
+        return Err(format!("strategy must be a valid Python identifier (got: {strategy:?})"));
+    }
+    if download_timeframes.is_empty() {
+        return Err("downloadTimeframes must contain at least one timeframe".into());
+    }
+    let _ = &base_timeframe; // accepted for API symmetry with train_local_model; backtesting itself defaults to the strategy's own `timeframe` attribute
+
+    ensure_docker_ready(&app, &bot_id).await?;
+
+    let download_container = training_container_name(&bot_id, "download");
+    let backtest_container = training_container_name(&bot_id, "backtest");
+    for name in [&download_container, &backtest_container] {
+        remove_container(name).await;
+    }
+
+    let work_dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("could not resolve app data dir: {e}"))?
+        .join("freqtrade")
+        .join(&bot_id);
+    let user_data_dir = work_dir.join("user_data");
+    let strategies_dir = user_data_dir.join("strategies");
+    std::fs::create_dir_all(&strategies_dir).map_err(|e| format!("could not create strategies dir: {e}"))?;
+    std::fs::write(strategies_dir.join(format!("{strategy}.py")), &strategy_code)
+        .map_err(|e| format!("could not write strategy file: {e}"))?;
+
+    let clamped_pair_count = auto_select_pair_count.clamp(10, 200);
+
+    // No train/backtest split to size this from (see
+    // build_local_backtest_config's doc comment) — just enough history for
+    // a meaningful sample of trades. Also passed to backtesting below,
+    // purely to bound the run to the same window that was actually
+    // downloaded — plain backtesting doesn't require --timerange the way
+    // FreqAI backtesting does.
+    const RULE_BASED_BACKTEST_PERIOD_DAYS: i64 = 90;
+    let today = Utc::now().date_naive();
+    let start_date = today - Duration::days(RULE_BASED_BACKTEST_PERIOD_DAYS);
+    let fmt_date = |d: chrono::NaiveDate| d.format("%Y%m%d").to_string();
+    let timerange = format!("{}-{}", fmt_date(start_date), fmt_date(today));
+
+    let manual_pairs: Option<Vec<String>> = if auto_select_coins {
+        None
+    } else {
+        let pairs: Vec<String> = pair_whitelist.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect();
+        if pairs.is_empty() {
+            return Err("pairWhitelist must contain at least one pair when auto-select is off".into());
+        }
+        Some(pairs)
+    };
+
+    // Same per-data-source retry loop as train_local_model, and the same
+    // guarantee: every attempt resolves its own trading_pairs, builds the
+    // FULL config via build_local_backtest_config, validates it, and only
+    // then writes it to disk — so config.json is never in a state
+    // download-data or backtesting could run against except this one,
+    // fully-checked shape.
+    let mut download_ok = false;
+    let mut last_download_err = String::new();
+    for data_source in DATA_SOURCE_EXCHANGES {
+        emit_status(&app, &bot_id, format!("=== download-data: trying data source '{data_source}' ==="));
+
+        let trading_pairs = match &manual_pairs {
+            Some(pairs) => pairs.clone(),
+            None => match resolve_auto_select_pairs(&app, &bot_id, &work_dir, data_source, clamped_pair_count).await {
+                Ok(pairs) => pairs,
+                Err(e) => {
+                    last_download_err = format!("could not resolve top-{clamped_pair_count} pairlist via test-pairlist: {e}");
+                    continue;
+                }
+            },
+        };
+
+        let config = build_local_backtest_config(&LocalBacktestConfigParams { data_source, pair_whitelist: &trading_pairs });
+        validate_local_backtest_config(&config)?;
+        let config_json = serde_json::to_vec_pretty(&config).map_err(|e| e.to_string())?;
+        std::fs::write(user_data_dir.join("config.json"), config_json)
+            .map_err(|e| format!("could not write config.json: {e}"))?;
+
+        emit_status(
+            &app,
+            &bot_id,
+            format!("=== about to download {} pairs: {} ===", trading_pairs.len(), trading_pairs.join(", ")),
+        );
+
+        let mut download_data_args: Vec<&str> = vec!["download-data", "--config", "user_data/config.json", "--timeframes"];
+        download_data_args.extend(download_timeframes.iter().map(|t| t.as_str()));
+        download_data_args.push("--timerange");
+        download_data_args.push(&timerange);
+        download_data_args.push("--pairs");
+        download_data_args.extend(trading_pairs.iter().map(|p| p.as_str()));
+
+        match run_freqtrade_step_resumable(&app, &bot_id, &work_dir, &download_container, &download_data_args).await {
+            Ok(()) => {
+                download_ok = true;
+                break;
+            }
+            Err(e) => last_download_err = e,
+        }
+    }
+    if !download_ok {
+        return Err(format!(
+            "historical data download failed against every data source (tried: {}): {last_download_err}",
+            DATA_SOURCE_EXCHANGES.join(", ")
+        ));
+    }
+
+    run_freqtrade_step_resumable(
+        &app,
+        &bot_id,
+        &work_dir,
+        &backtest_container,
+        &[
+            "backtesting",
+            "--config",
+            "user_data/config.json",
+            "--strategy",
+            &strategy,
+            "--timerange",
+            &timerange,
+            // Same fix as train_local_model's backtesting call (see its own
+            // comment) — an explicit user-initiated backtest must always
+            // actually run, never silently reuse a cached result. Belt-and-
+            // braces here: the remove_container calls above already force
+            // a fresh container every time, but this is what actually
+            // stops freqtrade's own "Reusing result of previous backtest"
+            // from firing inside it.
+            "--cache",
+            "none",
+        ],
+    )
+    .await?;
+
+    let result = read_backtest_stats(&user_data_dir, &strategy);
+    for name in [&download_container, &backtest_container] {
+        remove_container(name).await;
+    }
+    result
+}
+
+// Reads the summary stats freqtrade's own backtesting run just wrote —
+// there is no plain, uncompressed JSON on disk with these numbers: freqtrade
+// writes a `.last_result.json` pointer file (`{"latest_backtest": "<zip
+// name>"}`) next to a `backtest-result-<timestamp>.zip` archive, and the
+// per-strategy stats (profit_total_pct, winrate, max_drawdown_account, ...)
+// only ever live INSIDE that zip, under an entry with the same name as the
+// zip but a `.json` extension — confirmed by reading freqtrade's own
+// optimize_reports source (store_backtest_stats/store_backtest_analysis_results)
+// rather than assumed, same audit approach as build_local_training_config's
+// own checklist.
+fn read_backtest_stats(user_data_dir: &Path, strategy: &str) -> Result<BacktestSummary, String> {
+    let backtest_results_dir = user_data_dir.join("backtest_results");
+    let last_result_path = backtest_results_dir.join(".last_result.json");
+    let last_result: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&last_result_path).map_err(|e| format!("could not read {}: {e}", last_result_path.display()))?,
+    )
+    .map_err(|e| format!("could not parse .last_result.json: {e}"))?;
+    let zip_name = last_result
+        .get("latest_backtest")
+        .and_then(|v| v.as_str())
+        .ok_or("'.last_result.json' had no 'latest_backtest' field")?;
+
+    let zip_path = backtest_results_dir.join(zip_name);
+    let stats_entry_name = Path::new(zip_name).with_extension("json");
+    let stats_entry_name = stats_entry_name
+        .file_name()
+        .and_then(|f| f.to_str())
+        .ok_or("could not derive the stats entry name from the result zip's filename")?
+        .to_string();
+
+    let zip_file = std::fs::File::open(&zip_path).map_err(|e| format!("could not open backtest result archive {}: {e}", zip_path.display()))?;
+    let mut archive = zip::ZipArchive::new(zip_file).map_err(|e| format!("could not read backtest result archive: {e}"))?;
+    let mut stats_json = String::new();
+    archive
+        .by_name(&stats_entry_name)
+        .map_err(|e| format!("backtest result archive has no '{stats_entry_name}' entry: {e}"))?
+        .read_to_string(&mut stats_json)
+        .map_err(|e| format!("could not read backtest stats from the archive: {e}"))?;
+
+    let stats: serde_json::Value = serde_json::from_str(&stats_json).map_err(|e| format!("could not parse backtest stats JSON: {e}"))?;
+    let strat = stats
+        .get("strategy")
+        .and_then(|s| s.get(strategy))
+        .ok_or_else(|| format!("backtest stats have no results for strategy '{strategy}'"))?;
+
+    let get_f64 = |key: &str| strat.get(key).and_then(|v| v.as_f64()).ok_or_else(|| format!("backtest stats missing numeric field '{key}'"));
+    let get_i64 = |key: &str| strat.get(key).and_then(|v| v.as_i64()).ok_or_else(|| format!("backtest stats missing numeric field '{key}'"));
+
+    Ok(BacktestSummary {
+        total_profit_pct: get_f64("profit_total_pct")?,
+        wins: get_i64("wins")?,
+        losses: get_i64("losses")?,
+        draws: get_i64("draws")?,
+        win_rate: get_f64("winrate")?,
+        // max_relative_drawdown is the percentage form; max_drawdown_account
+        // is an older/alternate key some freqtrade versions used for the
+        // same thing — try both rather than assume one exact version.
+        max_drawdown_pct: strat
+            .get("max_relative_drawdown")
+            .and_then(|v| v.as_f64())
+            .or_else(|| strat.get("max_drawdown_account").and_then(|v| v.as_f64()))
+            .ok_or("backtest stats missing max_relative_drawdown/max_drawdown_account")?,
+    })
+}
+
+#[cfg(test)]
+mod read_backtest_stats_tests {
+    use super::{read_backtest_stats, BacktestSummary};
+    use std::io::Write;
+
+    // Builds a minimal but realistic on-disk backtest_results/ directory —
+    // .last_result.json plus a zip containing exactly the stats entry
+    // read_backtest_stats looks for — matching the exact shape freqtrade's
+    // own store_backtest_stats writes (see read_backtest_stats' own doc
+    // comment). Exercises the real parsing logic end to end, the same
+    // regression-proofing approach used for build_local_training_config's
+    // own tests.
+    fn write_fixture(dir: &std::path::Path, strategy: &str, stats_body: serde_json::Value) {
+        let backtest_results_dir = dir.join("backtest_results");
+        std::fs::create_dir_all(&backtest_results_dir).unwrap();
+
+        let zip_name = "backtest-result-20260101_000000.zip";
+        let stats_entry_name = "backtest-result-20260101_000000.json";
+
+        std::fs::write(
+            backtest_results_dir.join(".last_result.json"),
+            serde_json::json!({ "latest_backtest": zip_name }).to_string(),
+        )
+        .unwrap();
+
+        let full_stats = serde_json::json!({ "strategy": { strategy: stats_body } });
+        let zip_path = backtest_results_dir.join(zip_name);
+        let zip_file = std::fs::File::create(&zip_path).unwrap();
+        let mut zip_writer = zip::ZipWriter::new(zip_file);
+        zip_writer.start_file(stats_entry_name, zip::write::SimpleFileOptions::default()).unwrap();
+        zip_writer.write_all(full_stats.to_string().as_bytes()).unwrap();
+        zip_writer.finish().unwrap();
+    }
+
+    #[test]
+    fn parses_a_well_formed_backtest_result_archive() {
+        let dir = std::env::temp_dir().join(format!("freqpanda-backtest-stats-test-{}", uuid_like()));
+        write_fixture(
+            &dir,
+            "SimpleRsiMacdStrategy",
+            serde_json::json!({
+                "profit_total_pct": 12.5,
+                "wins": 8,
+                "losses": 3,
+                "draws": 1,
+                "winrate": 0.6667,
+                "max_relative_drawdown": 4.2,
+            }),
+        );
+
+        let summary: BacktestSummary = read_backtest_stats(&dir, "SimpleRsiMacdStrategy").unwrap();
+        assert_eq!(summary.total_profit_pct, 12.5);
+        assert_eq!(summary.wins, 8);
+        assert_eq!(summary.losses, 3);
+        assert_eq!(summary.draws, 1);
+        assert_eq!(summary.win_rate, 0.6667);
+        assert_eq!(summary.max_drawdown_pct, 4.2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn falls_back_to_max_drawdown_account_when_max_relative_drawdown_is_absent() {
+        let dir = std::env::temp_dir().join(format!("freqpanda-backtest-stats-test-{}", uuid_like()));
+        write_fixture(
+            &dir,
+            "BollingerMeanReversionStrategy",
+            serde_json::json!({
+                "profit_total_pct": -2.1,
+                "wins": 1,
+                "losses": 4,
+                "draws": 0,
+                "winrate": 0.2,
+                "max_drawdown_account": 9.9,
+            }),
+        );
+
+        let summary = read_backtest_stats(&dir, "BollingerMeanReversionStrategy").unwrap();
+        assert_eq!(summary.max_drawdown_pct, 9.9);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn errors_clearly_when_the_strategy_name_does_not_match() {
+        let dir = std::env::temp_dir().join(format!("freqpanda-backtest-stats-test-{}", uuid_like()));
+        write_fixture(&dir, "SimpleRsiMacdStrategy", serde_json::json!({ "profit_total_pct": 1.0 }));
+
+        let err = read_backtest_stats(&dir, "SomeOtherStrategy").unwrap_err();
+        assert!(err.contains("SomeOtherStrategy"), "error should name the requested strategy, got: {err}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A tiny process-unique suffix so parallel test runs never collide on
+    // the same temp directory — not a real UUID, just enough entropy for
+    // this test module's own throwaway fixtures.
+    fn uuid_like() -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        format!("{}-{:?}", std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos())
+    }
+}
+
 // ============================================================================
 // THE central freqtrade config.json generator for LOCAL TRAINING.
 //
@@ -566,6 +920,52 @@ fn build_local_training_config(params: &LocalTrainingConfigParams) -> serde_json
     })
 }
 
+// Shared by both local config validators below (validate_local_training_
+// config for FreqAI, validate_local_backtest_config for rule-based bots —
+// see lib/rule-based-presets.ts) — a concrete StaticPairList and present
+// entry_pricing/exit_pricing are general freqtrade config requirements,
+// not FreqAI-specific ones: freqtrade's Pairlist Handlers refuse
+// VolumePairList under backtesting regardless of FreqAI ("Pairlist
+// Handlers VolumePairList do not support backtesting"), and
+// Exchange.validate_config does its raw entry_pricing/exit_pricing dict
+// subscript for every config, FreqAI or not.
+fn validate_pairlist_and_pricing(config: &serde_json::Value) -> Result<(), String> {
+    let pairlist_method = config.get("pairlists").and_then(|p| p.get(0)).and_then(|p| p.get("method")).and_then(|m| m.as_str());
+    if pairlist_method != Some("StaticPairList") {
+        return Err(format!(
+            "generated config.json's pairlists[0].method is {pairlist_method:?}, expected \"StaticPairList\" — freqtrade's Pairlist Handlers do not support VolumePairList under backtesting"
+        ));
+    }
+    let pair_whitelist = config.get("exchange").and_then(|e| e.get("pair_whitelist")).and_then(|w| w.as_array());
+    match pair_whitelist {
+        None => return Err("generated config.json is missing exchange.pair_whitelist".into()),
+        Some(pairs) if pairs.is_empty() => {
+            return Err("generated config.json's exchange.pair_whitelist is empty — StaticPairList needs at least 1 concrete pair".into());
+        }
+        Some(pairs) => {
+            for pair in pairs {
+                let pair_str = pair.as_str().unwrap_or("");
+                if pair_str.is_empty() || pair_str.contains('*') || !pair_str.contains('/') {
+                    return Err(format!(
+                        "generated config.json's exchange.pair_whitelist contains {pair:?}, which isn't a concrete \"BASE/QUOTE\" pair — looks like a wildcard/regex leaked in"
+                    ));
+                }
+            }
+        }
+    }
+
+    for pricing_key in ["entry_pricing", "exit_pricing"] {
+        let pricing_value = config.get(pricing_key);
+        if !matches!(pricing_value, Some(v) if v.is_object()) {
+            return Err(format!("generated config.json's '{pricing_key}' is missing or not an object"));
+        }
+        if pricing_value.and_then(|v| v.get("price_side")).is_none() {
+            return Err(format!("generated config.json's '{pricing_key}' is missing 'price_side'"));
+        }
+    }
+    Ok(())
+}
+
 // Self-validation for every config build_local_training_config produces —
 // see that function's own doc comment for the full checklist and why this
 // exists. Called on every attempt, right after building the config and
@@ -597,41 +997,11 @@ fn validate_local_training_config(config: &serde_json::Value, timerange: &str, d
         }
     }
 
-    // ===== Requirement 1: PAIRLIST =====
-    let pairlist_method = config.get("pairlists").and_then(|p| p.get(0)).and_then(|p| p.get("method")).and_then(|m| m.as_str());
-    if pairlist_method != Some("StaticPairList") {
-        return Err(format!(
-            "generated config.json's pairlists[0].method is {pairlist_method:?}, expected \"StaticPairList\" — freqtrade's Pairlist Handlers do not support VolumePairList under backtesting"
-        ));
-    }
-    let pair_whitelist = config.get("exchange").and_then(|e| e.get("pair_whitelist")).and_then(|w| w.as_array());
-    match pair_whitelist {
-        None => return Err("generated config.json is missing exchange.pair_whitelist".into()),
-        Some(pairs) if pairs.is_empty() => {
-            return Err("generated config.json's exchange.pair_whitelist is empty — StaticPairList needs at least 1 concrete pair".into());
-        }
-        Some(pairs) => {
-            for pair in pairs {
-                let pair_str = pair.as_str().unwrap_or("");
-                if pair_str.is_empty() || pair_str.contains('*') || !pair_str.contains('/') {
-                    return Err(format!(
-                        "generated config.json's exchange.pair_whitelist contains {pair:?}, which isn't a concrete \"BASE/QUOTE\" pair — looks like a wildcard/regex leaked in"
-                    ));
-                }
-            }
-        }
-    }
-
-    // ===== Requirement 2: entry_pricing / exit_pricing =====
-    for pricing_key in ["entry_pricing", "exit_pricing"] {
-        let pricing_value = config.get(pricing_key);
-        if !matches!(pricing_value, Some(v) if v.is_object()) {
-            return Err(format!("generated config.json's '{pricing_key}' is missing or not an object"));
-        }
-        if pricing_value.and_then(|v| v.get("price_side")).is_none() {
-            return Err(format!("generated config.json's '{pricing_key}' is missing 'price_side'"));
-        }
-    }
+    // ===== Requirements 1 & 2: PAIRLIST, entry_pricing / exit_pricing =====
+    // Shared with validate_local_backtest_config below — see
+    // validate_pairlist_and_pricing's own doc comment for why these two
+    // aren't actually FreqAI-specific requirements at all.
+    validate_pairlist_and_pricing(config)?;
 
     let feature_parameters = config.get("freqai").and_then(|f| f.get("feature_parameters"));
 
@@ -686,6 +1056,77 @@ fn validate_local_training_config(config: &serde_json::Value, timerange: &str, d
     }
 
     Ok(())
+}
+
+// ============================================================================
+// Config generator for RULE-BASED (non-FreqAI) local backtesting — see
+// lib/rule-based-presets.ts and run_local_backtest below. Deliberately much
+// smaller than build_local_training_config above: a rule-based strategy has
+// no model to train, so there is no freqai section, no train/backtest
+// period split, and none of that function's 8-item FreqAI checklist — only
+// the two general freqtrade config requirements every backtest needs
+// regardless of FreqAI (see validate_pairlist_and_pricing):
+//   1. PAIRLIST — StaticPairList with concrete pairs, same rule as FreqAI.
+//   2. entry_pricing / exit_pricing — same raw dict-subscript requirement.
+// No --timerange requirement here, unlike FreqAI backtesting: plain
+// (non-FreqAI) backtesting runs fine without one, against whatever's on
+// disk. run_local_backtest still passes one anyway, purely to bound how
+// much history gets downloaded and backtested — not because freqtrade
+// demands it.
+struct LocalBacktestConfigParams<'a> {
+    data_source: &'a str,
+    /// Must already be concrete — same rule as
+    /// LocalTrainingConfigParams.pair_whitelist.
+    pair_whitelist: &'a [String],
+}
+
+fn build_local_backtest_config(params: &LocalBacktestConfigParams) -> serde_json::Value {
+    serde_json::json!({
+        "stake_currency": "USDT",
+        "stake_amount": "unlimited",
+        "dry_run": true,
+        "trading_mode": "spot",
+        // freqtrade's SCHEMA_TRADE_REQUIRED lists this as required, with
+        // no schema-level default — same as build_local_training_config.
+        "max_open_trades": 5,
+        "exchange": {
+            "name": params.data_source,
+            "key": "",
+            "secret": "",
+            "pair_whitelist": params.pair_whitelist,
+            "pair_blacklist": [],
+        },
+        "pairlists": [{ "method": "StaticPairList" }],
+        "entry_pricing": { "price_side": "same", "use_order_book": true, "order_book_top": 1 },
+        "exit_pricing": { "price_side": "same", "use_order_book": true, "order_book_top": 1 },
+    })
+}
+
+// Self-validation for every config build_local_backtest_config produces —
+// same role as validate_local_training_config, called right after building
+// the config and before it's ever written to disk or handed to Docker.
+fn validate_local_backtest_config(config: &serde_json::Value) -> Result<(), String> {
+    const REQUIRED_TOP_LEVEL_KEYS: &[&str] = &[
+        "stake_currency", "stake_amount", "dry_run", "trading_mode", "max_open_trades",
+        "exchange", "pairlists", "entry_pricing", "exit_pricing",
+    ];
+    for key in REQUIRED_TOP_LEVEL_KEYS {
+        if config.get(key).is_none() {
+            return Err(format!(
+                "generated rule-based config.json is missing required key '{key}' — this is a bug in build_local_backtest_config, not a Docker/network problem"
+            ));
+        }
+    }
+    // Canary, not a real freqtrade requirement: a rule-based bot must never
+    // carry a freqai section. If one ever shows up here, it means
+    // build_local_backtest_config got copy-pasted from (or confused with)
+    // build_local_training_config at some call site — catch that here
+    // rather than let it silently ship a freqai block for a bot that has
+    // no model and no freqaiConfig to build one from.
+    if config.get("freqai").is_some() {
+        return Err("generated rule-based config.json unexpectedly has a 'freqai' section — rule-based bots must never carry one".into());
+    }
+    validate_pairlist_and_pricing(config)
 }
 
 #[cfg(test)]
@@ -832,6 +1273,78 @@ mod local_training_config_tests {
         config["freqai"]["feature_parameters"].as_object_mut().unwrap().remove("shuffle_after_split");
         let err = validate_local_training_config(&config, VALID_TIMERANGE, VALID_TIMEFRAME).unwrap_err();
         assert!(err.contains("shuffle_after_split"), "error should name the missing key, got: {err}");
+    }
+}
+
+#[cfg(test)]
+mod local_backtest_config_tests {
+    use super::{build_local_backtest_config, validate_local_backtest_config, LocalBacktestConfigParams};
+
+    fn valid_config() -> serde_json::Value {
+        build_local_backtest_config(&LocalBacktestConfigParams {
+            data_source: "okx",
+            pair_whitelist: &["BTC/USDT".to_string(), "ETH/USDT".to_string()],
+        })
+    }
+
+    #[test]
+    fn build_local_backtest_config_passes_its_own_validation() {
+        assert!(validate_local_backtest_config(&valid_config()).is_ok());
+    }
+
+    #[test]
+    fn never_carries_a_freqai_section() {
+        assert!(valid_config().get("freqai").is_none());
+    }
+
+    #[test]
+    fn rejects_a_freqai_section_if_one_appears() {
+        // Canary test: if build_local_backtest_config is ever accidentally
+        // changed to add a freqai block (e.g. copy-pasted from
+        // build_local_training_config), this must fail loudly.
+        let mut config = valid_config();
+        config["freqai"] = serde_json::json!({ "enabled": true });
+        let err = validate_local_backtest_config(&config).unwrap_err();
+        assert!(err.contains("freqai"), "error should mention the unexpected freqai section, got: {err}");
+    }
+
+    #[test]
+    fn rejects_volume_pair_list() {
+        let mut config = valid_config();
+        config["pairlists"] = serde_json::json!([{ "method": "VolumePairList", "number_assets": 20 }]);
+        let err = validate_local_backtest_config(&config).unwrap_err();
+        assert!(err.contains("VolumePairList") || err.contains("StaticPairList"), "error should name the pairlist problem, got: {err}");
+    }
+
+    #[test]
+    fn rejects_a_wildcard_pair_whitelist() {
+        let mut config = valid_config();
+        config["exchange"]["pair_whitelist"] = serde_json::json!([".*/USDT"]);
+        let err = validate_local_backtest_config(&config).unwrap_err();
+        assert!(err.contains("pair_whitelist"), "error should name the field, got: {err}");
+    }
+
+    #[test]
+    fn rejects_an_empty_pair_whitelist() {
+        let mut config = valid_config();
+        config["exchange"]["pair_whitelist"] = serde_json::json!([]);
+        assert!(validate_local_backtest_config(&config).is_err());
+    }
+
+    #[test]
+    fn rejects_a_config_missing_exit_pricing() {
+        let mut config = valid_config();
+        config.as_object_mut().unwrap().remove("exit_pricing");
+        let err = validate_local_backtest_config(&config).unwrap_err();
+        assert!(err.contains("exit_pricing"), "error should name the missing key, got: {err}");
+    }
+
+    #[test]
+    fn rejects_a_config_missing_max_open_trades() {
+        let mut config = valid_config();
+        config.as_object_mut().unwrap().remove("max_open_trades");
+        let err = validate_local_backtest_config(&config).unwrap_err();
+        assert!(err.contains("max_open_trades"), "error should name the missing key, got: {err}");
     }
 }
 
@@ -1515,7 +2028,7 @@ fn main() {
             tauri::async_runtime::spawn(check_for_update(app.handle().clone()));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![train_local_model, local_training_status])
+        .invoke_handler(tauri::generate_handler![train_local_model, local_training_status, run_local_backtest])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

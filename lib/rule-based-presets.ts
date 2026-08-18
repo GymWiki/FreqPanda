@@ -1,0 +1,267 @@
+// A second, simpler bot type alongside FreqAI (see lib/strategy-presets.ts):
+// classic, rule-based freqtrade strategies — plain indicator logic, no
+// machine-learning model to train or upload. A bot of this kind only ever
+// needs historical data downloaded and (optionally) backtested locally —
+// see run_local_backtest in src-tauri/src/main.rs, the non-FreqAI
+// counterpart to train_local_model. Selected once at bot creation via
+// BotConfiguration.strategyType = "RULE_BASED" (see prisma/schema.prisma)
+// and never changes afterward, same as a FreqAI bot's chosen persona.
+
+export interface RuleBasedPreset {
+  id: string;
+  title: string;
+  description: string;
+  risk: "Laag" | "Gemiddeld" | "Hoog";
+  /** Display string shown in the UI (e.g. "15m"). */
+  timeframe: string;
+  /**
+   * The single concrete freqtrade timeframe value baked into the strategy's
+   * own `timeframe` class attribute — used for `download-data --timeframes`
+   * and (optionally) `backtesting --timeframe`. Kept separate from the
+   * display `timeframe` above for the same reason
+   * FreqAIFeatureConfig.baseTimeframe is in lib/strategy-presets.ts.
+   */
+  baseTimeframe: string;
+  /**
+   * Set only for a strategy that pulls in a higher timeframe as an
+   * informative pair (e.g. TrendVolumeStrategy's `informative_timeframe`,
+   * via `merge_informative_pair`) — the frontend unions this with
+   * baseTimeframe into run_local_backtest's downloadTimeframes so
+   * download-data actually fetches both, not just the base one. Undefined
+   * for a single-timeframe strategy.
+   */
+  informativeTimeframe?: string;
+  /** Python class name — becomes both `strategy` and part of a filename. Never shown in the UI. */
+  className: string;
+  code: string;
+  /**
+   * Minimum warm-up candles this strategy's own indicators need before
+   * their lookback windows are fully populated (no partial-NaN values) —
+   * mirrors FreqAIFeatureConfig.startupCandleCount's role for FreqAI
+   * presets, and is folded the same way into how much history
+   * run_local_backtest downloads before backtesting.
+   */
+  startupCandleCount: number;
+}
+
+const RSI_MACD_CODE = `import talib.abstract as ta
+from freqtrade.strategy import IStrategy
+
+
+class SimpleRsiMacdStrategy(IStrategy):
+    """Eenvoudige, regel-gebaseerde strategie zonder machine learning —
+    gebaseerd op het patroon van freqtrade's eigen officiële voorbeeld
+    (freqtrade/templates/sample_strategy.py, gegenereerd via de
+    'freqtrade new-strategy'-opdracht). Combineert twee bekende
+    indicatoren: RSI (koopt bij oversold) en MACD (bevestigt de richting
+    van de trend).
+    Geen training, geen modelbestand nodig — werkt direct na het
+    downloaden van historische data.
+    """
+
+    timeframe = "15m"
+    minimal_roi = {"0": 0.05, "30": 0.025, "60": 0.01, "120": 0}
+    stoploss = -0.08
+    trailing_stop = False
+    process_only_new_candles = True
+
+    # Generous warm-up so RSI/MACD are fully computed (no partial-NaN
+    # lookback window) before the first real signal — must stay in sync
+    # with startupCandleCount in lib/rule-based-presets.ts, which
+    # src-tauri/src/main.rs also uses to size how much history a local
+    # backtest run downloads.
+    startup_candle_count = 50
+
+    def populate_indicators(self, dataframe, metadata):
+        dataframe["rsi"] = ta.RSI(dataframe, timeperiod=14)
+        macd = ta.MACD(dataframe)
+        dataframe["macd"] = macd["macd"]
+        dataframe["macdsignal"] = macd["macdsignal"]
+        return dataframe
+
+    def populate_entry_trend(self, dataframe, metadata):
+        dataframe.loc[
+            (dataframe["rsi"] < 35)
+            & (dataframe["macd"] > dataframe["macdsignal"])
+            & (dataframe["volume"] > 0),
+            "enter_long",
+        ] = 1
+        return dataframe
+
+    def populate_exit_trend(self, dataframe, metadata):
+        dataframe.loc[
+            (dataframe["rsi"] > 70) | (dataframe["macd"] < dataframe["macdsignal"]),
+            "exit_long",
+        ] = 1
+        return dataframe
+`;
+
+// NOT the real NostalgiaForInfinity. The actual project
+// (https://github.com/iterativv/NostalgiaForInfinity, GPL-3.0) is a single
+// strategy file that has grown to roughly 75,000+ lines across dozens of
+// entry/exit "modes", with companion pairlist/blacklist config files and an
+// update sidecar — far beyond what can be embedded, understood, or safely
+// kept in sync inside this codebase, and a partial rewrite of it would sit
+// in genuine copyright ambiguity as a derivative of a GPL-3.0 work without
+// actually being practical to ship under that license here. This is a much
+// smaller, original strategy inspired only by NFI's general *approach*
+// (require a higher-timeframe trend before trading a lower one, combined
+// with volume/RSI confirmation) — labelled honestly as such in its own
+// description and docstring, with a link to the real project for anyone
+// who wants the genuine strategy.
+const TREND_VOLUME_CODE = `import talib.abstract as ta
+from freqtrade.strategy import IStrategy, merge_informative_pair
+
+
+class TrendVolumeStrategy(IStrategy):
+    """Geïnspireerd door de algemene aanpak van het populaire community-
+    project NostalgiaForInfinity (https://github.com/iterativv/
+    NostalgiaForInfinity, GPL-3.0): alleen instappen als een hogere
+    timeframe een opwaartse trend bevestigt, gecombineerd met volume- en
+    RSI-condities. Dit is NIET de daadwerkelijke NostalgiaForInfinity-code
+    — die strategie is inmiddels tienduizenden regels met tientallen
+    entry/exit-modes en hoort niet zomaar gekopieerd te worden. Dit is een
+    eigen, veel eenvoudigere strategie die dezelfde denkwijze volgt.
+    """
+
+    timeframe = "15m"
+    informative_timeframe = "1h"
+    minimal_roi = {"0": 0.06, "60": 0.03, "180": 0.01, "360": 0}
+    stoploss = -0.1
+    trailing_stop = True
+    trailing_stop_positive = 0.015
+    trailing_stop_positive_offset = 0.03
+    trailing_only_offset_is_reached = True
+    process_only_new_candles = True
+
+    # Generous warm-up (the 1h informative pair's own 200-candle EMA is the
+    # widest lookback here) so every indicator is fully computed before the
+    # first real signal — must stay in sync with startupCandleCount in
+    # lib/rule-based-presets.ts, which src-tauri/src/main.rs also uses to
+    # size how much history a local backtest run downloads.
+    startup_candle_count = 100
+
+    def informative_pairs(self):
+        pairs = self.dp.current_whitelist()
+        return [(pair, self.informative_timeframe) for pair in pairs]
+
+    def populate_indicators(self, dataframe, metadata):
+        informative = self.dp.get_pair_dataframe(pair=metadata["pair"], timeframe=self.informative_timeframe)
+        informative["ema50"] = ta.EMA(informative, timeperiod=50)
+        informative["ema200"] = ta.EMA(informative, timeperiod=200)
+        dataframe = merge_informative_pair(dataframe, informative, self.timeframe, self.informative_timeframe, ffill=True)
+
+        dataframe["rsi"] = ta.RSI(dataframe, timeperiod=14)
+        dataframe["ema20"] = ta.EMA(dataframe, timeperiod=20)
+        dataframe["volume_mean_20"] = dataframe["volume"].rolling(20).mean()
+        return dataframe
+
+    def populate_entry_trend(self, dataframe, metadata):
+        dataframe.loc[
+            (dataframe[f"ema50_{self.informative_timeframe}"] > dataframe[f"ema200_{self.informative_timeframe}"])
+            & (dataframe["close"] > dataframe["ema20"])
+            & (dataframe["rsi"] < 40)
+            & (dataframe["volume"] > dataframe["volume_mean_20"])
+            & (dataframe["volume"] > 0),
+            "enter_long",
+        ] = 1
+        return dataframe
+
+    def populate_exit_trend(self, dataframe, metadata):
+        dataframe.loc[
+            (dataframe["rsi"] > 75)
+            | (dataframe[f"ema50_{self.informative_timeframe}"] < dataframe[f"ema200_{self.informative_timeframe}"]),
+            "exit_long",
+        ] = 1
+        return dataframe
+`;
+
+const BOLLINGER_CODE = `import talib.abstract as ta
+from freqtrade.strategy import IStrategy
+
+
+class BollingerMeanReversionStrategy(IStrategy):
+    """Mean-reversion strategie op basis van Bollinger Bands: koopt wanneer
+    de prijs de onderste band aantikt (verwacht herstel naar het
+    gemiddelde), verkoopt zodra de prijs de middelste band (het
+    voortschrijdend gemiddelde) weer bereikt. Een bekend, eenvoudig
+    patroon — geen training of modelbestand nodig.
+    """
+
+    timeframe = "1h"
+    minimal_roi = {"0": 0.04, "120": 0.02, "360": 0}
+    stoploss = -0.06
+    trailing_stop = False
+    process_only_new_candles = True
+
+    # Generous warm-up so the Bollinger Bands' own 20-candle lookback (and
+    # RSI's 14) are fully computed before the first real signal — must stay
+    # in sync with startupCandleCount in lib/rule-based-presets.ts, which
+    # src-tauri/src/main.rs also uses to size how much history a local
+    # backtest run downloads.
+    startup_candle_count = 40
+
+    def populate_indicators(self, dataframe, metadata):
+        bollinger = ta.BBANDS(dataframe, timeperiod=20, nbdevup=2.0, nbdevdn=2.0)
+        dataframe["bb_lowerband"] = bollinger["lowerband"]
+        dataframe["bb_middleband"] = bollinger["middleband"]
+        dataframe["bb_upperband"] = bollinger["upperband"]
+        dataframe["rsi"] = ta.RSI(dataframe, timeperiod=14)
+        return dataframe
+
+    def populate_entry_trend(self, dataframe, metadata):
+        dataframe.loc[
+            (dataframe["close"] <= dataframe["bb_lowerband"])
+            & (dataframe["rsi"] < 40)
+            & (dataframe["volume"] > 0),
+            "enter_long",
+        ] = 1
+        return dataframe
+
+    def populate_exit_trend(self, dataframe, metadata):
+        dataframe.loc[
+            (dataframe["close"] >= dataframe["bb_middleband"]) | (dataframe["close"] >= dataframe["bb_upperband"]),
+            "exit_long",
+        ] = 1
+        return dataframe
+`;
+
+export const RULE_BASED_PRESETS: RuleBasedPreset[] = [
+  {
+    id: "rb-rsi-macd",
+    title: "RSI + MACD",
+    description:
+      "Klassieke instapregels: koopt bij een oversold RSI mét bevestiging van de MACD-trend. Werkt met 5-15 paren op een 15m-timeframe. Geen AI, geen training — direct te backtesten.",
+    risk: "Gemiddeld",
+    timeframe: "15m",
+    baseTimeframe: "15m",
+    className: "SimpleRsiMacdStrategy",
+    code: RSI_MACD_CODE,
+    startupCandleCount: 50,
+  },
+  {
+    id: "rb-trend-volume",
+    title: "Trend & Volume (NFI-geïnspireerd)",
+    description:
+      "Stapt alleen in als een hogere timeframe (1h) een opwaartse trend bevestigt, met volume- en RSI-condities op 15m. Geïnspireerd door NostalgiaForInfinity's aanpak — géén kopie van die code. Werkt het best met 10-30 paren.",
+    risk: "Gemiddeld",
+    timeframe: "15m / 1h",
+    baseTimeframe: "15m",
+    informativeTimeframe: "1h",
+    className: "TrendVolumeStrategy",
+    code: TREND_VOLUME_CODE,
+    startupCandleCount: 100,
+  },
+  {
+    id: "rb-bollinger",
+    title: "Bollinger mean-reversion",
+    description:
+      "Koopt wanneer de prijs de onderste Bollinger Band aantikt, verkoopt bij terugkeer naar het gemiddelde. Eenvoudig en voorspelbaar, het best op een 1h-timeframe met 5-15 paren.",
+    risk: "Laag",
+    timeframe: "1h",
+    baseTimeframe: "1h",
+    className: "BollingerMeanReversionStrategy",
+    code: BOLLINGER_CODE,
+    startupCandleCount: 40,
+  },
+];

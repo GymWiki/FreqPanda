@@ -1,6 +1,6 @@
 [package]
 name = "freqtrade-command-center"
-version = "0.1.18"
+version = "0.2.0"
 description = "Freqtrade Command Center desktop app — local FreqAI training shell around the web dashboard"
 edition = "2021"
 rust-version = "1.77"
@@ -25,6 +25,13 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 # (see train_local_model in src/main.rs) — already an existing transitive
 # dependency (pulled in by tauri-plugin-updater), promoted to direct here.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Only used to read the stats JSON entry out of freqtrade's own
+# backtest-result-*.zip archive (see read_backtest_stats in src/main.rs) —
+# freqtrade only ever writes that JSON inside the zip, never as a plain
+# file on disk, so a rule-based bot's backtest summary can't be read any
+# other way. "deflate" only — freqtrade writes standard Python zipfile
+# ZIP_DEFLATED archives, nothing else needed.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [profile.release]
 panic = "abort"
@@ -32,3 +39,4 @@ codegen-units = 1
 lto = true
 opt-level = "s"
 strip = true
+

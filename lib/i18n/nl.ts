@@ -124,6 +124,12 @@ export const nl = {
       "Elke bot handelt met een AI-model en start in oefenmodus — pas als jij dat zelf wilt, schakel je over naar echt geld.",
     botNameLabel: "Botnaam",
     botNamePlaceholder: "Mijn eerste bot",
+    botTypeLabel: "Wat voor bot wil je maken?",
+    botTypeFreqAI: "FreqAI (machine learning)",
+    botTypeFreqAIDescription: "Een AI-model leert zelf patronen te herkennen. Moet eerst getraind worden voordat hij kan handelen.",
+    botTypeRuleBased: "Regel-gebaseerd (klassieke indicatoren)",
+    botTypeRuleBasedDescription: "Vaste, bekende indicatorregels (zoals RSI en MACD). Geen training nodig — direct te backtesten.",
+    ruleBasedStrategyLabel: "Welke strategie moet hij volgen?",
     aiBehaviorLabel: "Hoe moet je bot handelen?",
     aiBehaviorTooltip:
       "Bepaalt hoe voorzichtig of actief de AI handelt: hoe vaak hij posities opent en hoeveel risico hij daarbij neemt. Kan later niet meer gewijzigd worden voor deze bot.",
@@ -143,6 +149,27 @@ export const nl = {
     ariaLabel: "Kies hoe je bot moet handelen",
     riskSuffix: " risico",
     timeframePrefix: "Kijkt elke: ",
+  },
+
+  ruleBasedPicker: {
+    ariaLabel: "Kies een regel-gebaseerde strategie",
+    timeframePrefix: "Timeframe: ",
+  },
+
+  backtestResults: {
+    heading: "Backtest-resultaten",
+    disclaimer: "Historische resultaten zijn geen garantie voor toekomstige prestaties.",
+    totalProfit: "Totale winst",
+    winRate: "Win-rate",
+    trades: "Trades",
+    maxDrawdown: "Max. drawdown",
+    runBacktest: "Backtest starten",
+    rerunBacktest: "Opnieuw backtesten",
+    running: "Bezig met downloaden en backtesten…",
+    failed: "Backtest is mislukt",
+    needsApp: "Backtesten vereist de desktop-app — download 'm op de website.",
+    noneYet: "Nog geen backtest uitgevoerd voor deze bot.",
+    winLossDraw: (wins: number, losses: number, draws: number) => `${wins}W / ${losses}L / ${draws}D`,
   },
 
   budgetSlider: {

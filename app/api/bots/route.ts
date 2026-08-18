@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import { createClient } from "@/lib/supabase/server";
 import { prisma } from "@/lib/prisma";
 import { botSelect, toBotDTO } from "@/lib/bot-select";
@@ -31,7 +31,15 @@ const createBotBodySchema = z.object({
   botName: z.string().trim().min(1, "botName is required"),
   strategy: z.string().min(1, "strategy is required"),
   strategyCode: z.string().min(1, "strategyCode is required"),
-  freqaiConfig: z.record(z.string(), z.unknown()),
+  // Defaults to "FREQAI" so this stays backward-compatible with any client
+  // that hasn't been updated to send it yet — every bot before this field
+  // existed was a FreqAI bot by definition (see StrategyType in
+  // prisma/schema.prisma).
+  strategyType: z.enum(["FREQAI", "RULE_BASED"]).default("FREQAI"),
+  // Required for FREQAI, must be absent for RULE_BASED — enforced below,
+  // once strategyType is known, rather than here (a rule-based bot has no
+  // AI behavior to validate the shape of).
+  freqaiConfig: z.record(z.string(), z.unknown()).optional(),
   autoSelectCoins: z.boolean().optional(),
   autoSelectPairCount: z
     .number()
@@ -71,7 +79,7 @@ export const POST = withErrorHandling(async (req: NextRequest) => {
 
   const parsed = await parseJsonBody(req, createBotBodySchema);
   if ("error" in parsed) return parsed.error;
-  const { botName, strategy, strategyCode, freqaiConfig, autoSelectCoins, autoSelectPairCount, pairWhitelist } =
+  const { botName, strategy, strategyCode, strategyType, freqaiConfig, autoSelectCoins, autoSelectPairCount, pairWhitelist } =
     parsed.data;
 
   // Defaults to on (matches BotConfiguration.autoSelectCoins @default(true))
@@ -87,11 +95,19 @@ export const POST = withErrorHandling(async (req: NextRequest) => {
     );
   }
 
-  // Every bot runs on FreqAI — this is the training/feature/risk config for
-  // the chosen AI behavior (see lib/strategy-presets.ts), not optional
-  // metadata. lib/hetzner.ts trusts its shape when generating config.json.
-  if (!isValidFreqAIConfig(freqaiConfig)) {
-    return NextResponse.json({ error: "freqaiConfig is missing required fields" }, { status: 400 });
+  // FREQAI: freqaiConfig is the training/feature/risk config for the chosen
+  // AI behavior (see lib/strategy-presets.ts), not optional metadata —
+  // lib/hetzner.ts trusts its shape when generating config.json.
+  // RULE_BASED: there is no AI behavior to configure (see
+  // lib/rule-based-presets.ts) — freqaiConfig must be absent, not just
+  // unvalidated, so a bot's stored state can never silently mismatch its
+  // own strategyType.
+  if (strategyType === "FREQAI") {
+    if (!isValidFreqAIConfig(freqaiConfig)) {
+      return NextResponse.json({ error: "freqaiConfig is missing required fields" }, { status: 400 });
+    }
+  } else if (freqaiConfig !== undefined) {
+    return NextResponse.json({ error: "freqaiConfig must not be set for a rule-based (non-FreqAI) bot" }, { status: 400 });
   }
 
   // `strategy` becomes both a Python class name and a filename
@@ -131,7 +147,8 @@ export const POST = withErrorHandling(async (req: NextRequest) => {
       // creation time anymore.
       strategy,
       strategyCode,
-      freqaiConfig: freqaiConfig as Prisma.InputJsonValue,
+      strategyType,
+      freqaiConfig: strategyType === "FREQAI" ? (freqaiConfig as Prisma.InputJsonValue) : Prisma.JsonNull,
       autoSelectCoins: autoSelect,
       autoSelectPairCount: autoSelectPairCount ?? AUTO_PAIRLIST_SIZE_DEFAULT,
       pairWhitelist: autoSelect ? null : pairWhitelist,

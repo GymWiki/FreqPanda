@@ -26,8 +26,10 @@ import {
   Unlink,
   Clock,
   AlertTriangle,
+  BarChart3,
 } from "lucide-react";
 import type { BotConfigurationDTO } from "@/lib/types";
+import { RULE_BASED_PRESETS } from "@/lib/rule-based-presets";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { LifecycleBadge } from "@/components/ui/LifecycleBadge";
 import { deriveLifecycleStatus } from "@/lib/bot-lifecycle";
@@ -45,6 +47,21 @@ import { InfoTooltip } from "@/components/ui/Tooltip";
 
 interface BotDetailViewProps {
   bot: BotConfigurationDTO;
+}
+
+// Mirrors src-tauri/src/main.rs's BacktestSummary — the result of
+// run_local_backtest, the rule-based (non-FreqAI) counterpart to
+// train_local_model. Kept as a local interface, same convention this file
+// already uses for local_training_status's inline `{ state: string }`
+// result type, rather than a shared DTO — this never crosses the server
+// API, only the Tauri invoke boundary.
+interface BacktestSummary {
+  totalProfitPct: number;
+  wins: number;
+  losses: number;
+  draws: number;
+  winRate: number;
+  maxDrawdownPct: number;
 }
 
 // Everything that used to live directly on the compact dashboard card
@@ -66,6 +83,9 @@ export function BotDetailView({ bot: initialBot }: BotDetailViewProps) {
   const [isDeploying, setIsDeploying] = useState(false);
   const [isTrainingLocally, setIsTrainingLocally] = useState(false);
   const [trainingStatus, setTrainingStatus] = useState<string | null>(null);
+  const [isBacktesting, setIsBacktesting] = useState(false);
+  const [backtestStatus, setBacktestStatus] = useState<string | null>(null);
+  const [backtestResult, setBacktestResult] = useState<BacktestSummary | null>(null);
   const [isRevealingCredentials, setIsRevealingCredentials] = useState(false);
   const [apiCredentials, setApiCredentials] = useState<{ username: string; password: string } | null>(null);
   const [copiedField, setCopiedField] = useState<"username" | "password" | null>(null);
@@ -222,6 +242,52 @@ export function BotDetailView({ bot: initialBot }: BotDetailViewProps) {
       unlisten();
       setIsTrainingLocally(false);
       setTrainingStatus(null);
+    }
+  }
+
+  // The rule-based (non-FreqAI) counterpart to handleStartLocalTraining
+  // above — downloads data and runs a plain backtest via run_local_backtest
+  // (src-tauri/src/main.rs), no model to upload afterward. Deliberately
+  // simpler: no reconnect-on-mount effect (unlike training, a backtest is
+  // short enough that losing progress on a page refresh isn't worth the
+  // extra machinery — the user just clicks the button again).
+  async function handleRunLocalBacktest() {
+    setError(null);
+    setBacktestStatus(null);
+    setIsBacktesting(true);
+
+    const { invoke } = await import("@tauri-apps/api/core");
+    const { listen } = await import("@tauri-apps/api/event");
+
+    const unlisten = await listen<{ botId: string; line: string }>("training-progress", (event) => {
+      if (event.payload.botId === bot.id) {
+        setBacktestStatus(event.payload.line);
+      }
+    });
+
+    try {
+      const preset = RULE_BASED_PRESETS.find((p) => p.className === bot.strategy);
+      const baseTimeframe = preset?.baseTimeframe ?? "15m";
+      const downloadTimeframes = [baseTimeframe, preset?.informativeTimeframe].filter(
+        (tf): tf is string => Boolean(tf),
+      );
+      const summary = await invoke<BacktestSummary>("run_local_backtest", {
+        botId: bot.id,
+        strategy: bot.strategy,
+        strategyCode: bot.strategyCode,
+        baseTimeframe,
+        downloadTimeframes,
+        autoSelectCoins: bot.autoSelectCoins,
+        autoSelectPairCount: bot.autoSelectPairCount,
+        pairWhitelist: bot.pairWhitelist ?? "",
+      });
+      setBacktestResult(summary);
+    } catch (err) {
+      setError(toErrorMessage(err, dict.backtestResults.failed));
+    } finally {
+      unlisten();
+      setIsBacktesting(false);
+      setBacktestStatus(null);
     }
   }
 
@@ -439,38 +505,81 @@ export function BotDetailView({ bot: initialBot }: BotDetailViewProps) {
         {error && <p className="text-xs text-red-400">{error}</p>}
       </div>
 
-      {/* Trainingsstatus */}
-      <div className="card-surface flex flex-col gap-3 p-5">
-        <div className="flex items-center gap-1.5 text-xs font-medium text-slate-300">
-          <Clock className="h-3.5 w-3.5" />
-          {dict.botDetail.trainingStatusHeading}
+      {/* Trainingsstatus (FreqAI) of Backtest-resultaten (regel-gebaseerd) —
+          requirement: a "past results aren't a guarantee" disclaimer next
+          to backtest results, for both bot types, not just the new
+          rule-based one. */}
+      {bot.strategyType === "FREQAI" ? (
+        <div className="card-surface flex flex-col gap-3 p-5">
+          <div className="flex items-center gap-1.5 text-xs font-medium text-slate-300">
+            <Clock className="h-3.5 w-3.5" />
+            {dict.botDetail.trainingStatusHeading}
+          </div>
+          {trainingFreshness.everTrained ? (
+            <>
+              <p className="text-xs text-slate-400">
+                {trainingFreshness.daysSinceTraining === 0
+                  ? dict.botDetail.trainedToday
+                  : dict.botDetail.trainedDaysAgo(trainingFreshness.daysSinceTraining ?? 0)}
+              </p>
+              <div
+                className={`flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs ${
+                  trainingFreshness.retrainRecommended
+                    ? "border-amber-500/40 bg-amber-500/10 text-amber-300"
+                    : "border-primary/30 bg-primary/5 text-primary"
+                }`}
+              >
+                {trainingFreshness.retrainRecommended ? (
+                  <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                ) : (
+                  <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                )}
+                {trainingFreshness.retrainRecommended ? dict.botDetail.retrainRecommended : dict.botDetail.retrainNotNeeded}
+              </div>
+              <p className="text-[11px] text-slate-500">{dict.backtestResults.disclaimer}</p>
+            </>
+          ) : (
+            <p className="text-xs text-slate-500">{dict.botDetail.neverTrained}</p>
+          )}
         </div>
-        {trainingFreshness.everTrained ? (
-          <>
-            <p className="text-xs text-slate-400">
-              {trainingFreshness.daysSinceTraining === 0
-                ? dict.botDetail.trainedToday
-                : dict.botDetail.trainedDaysAgo(trainingFreshness.daysSinceTraining ?? 0)}
-            </p>
-            <div
-              className={`flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs ${
-                trainingFreshness.retrainRecommended
-                  ? "border-amber-500/40 bg-amber-500/10 text-amber-300"
-                  : "border-primary/30 bg-primary/5 text-primary"
-              }`}
-            >
-              {trainingFreshness.retrainRecommended ? (
-                <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-              ) : (
-                <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-              )}
-              {trainingFreshness.retrainRecommended ? dict.botDetail.retrainRecommended : dict.botDetail.retrainNotNeeded}
-            </div>
-          </>
-        ) : (
-          <p className="text-xs text-slate-500">{dict.botDetail.neverTrained}</p>
-        )}
-      </div>
+      ) : (
+        <div className="card-surface flex flex-col gap-3 p-5">
+          <div className="flex items-center gap-1.5 text-xs font-medium text-slate-300">
+            <BarChart3 className="h-3.5 w-3.5" />
+            {dict.backtestResults.heading}
+          </div>
+          {backtestResult ? (
+            <>
+              <div className="grid grid-cols-2 gap-2">
+                <div className="rounded-lg bg-background px-3 py-2">
+                  <p className="text-[11px] text-slate-500">{dict.backtestResults.totalProfit}</p>
+                  <p className={`text-sm font-semibold ${backtestResult.totalProfitPct >= 0 ? "text-primary" : "text-red-400"}`}>
+                    {backtestResult.totalProfitPct >= 0 ? "+" : ""}
+                    {backtestResult.totalProfitPct.toFixed(2)}%
+                  </p>
+                </div>
+                <div className="rounded-lg bg-background px-3 py-2">
+                  <p className="text-[11px] text-slate-500">{dict.backtestResults.winRate}</p>
+                  <p className="text-sm font-semibold text-slate-100">{(backtestResult.winRate * 100).toFixed(0)}%</p>
+                </div>
+                <div className="rounded-lg bg-background px-3 py-2">
+                  <p className="text-[11px] text-slate-500">{dict.backtestResults.trades}</p>
+                  <p className="text-sm font-semibold text-slate-100">
+                    {dict.backtestResults.winLossDraw(backtestResult.wins, backtestResult.losses, backtestResult.draws)}
+                  </p>
+                </div>
+                <div className="rounded-lg bg-background px-3 py-2">
+                  <p className="text-[11px] text-slate-500">{dict.backtestResults.maxDrawdown}</p>
+                  <p className="text-sm font-semibold text-amber-300">-{backtestResult.maxDrawdownPct.toFixed(2)}%</p>
+                </div>
+              </div>
+              <p className="text-[11px] text-slate-500">{dict.backtestResults.disclaimer}</p>
+            </>
+          ) : (
+            <p className="text-xs text-slate-500">{dict.backtestResults.noneYet}</p>
+          )}
+        </div>
+      )}
 
       {/* Exchange-koppeling */}
       <div className="card-surface flex flex-col gap-3 p-5">
@@ -560,65 +669,92 @@ export function BotDetailView({ bot: initialBot }: BotDetailViewProps) {
 
         <div className="space-y-2 rounded-lg border border-border p-3">
           {isTauri() ? (
-            <>
-              <button
-                type="button"
-                onClick={() => handleStartLocalTraining()}
-                disabled={isTrainingLocally}
-                className="flex w-full items-center justify-center gap-2 rounded-lg border border-primary/40 px-3 py-2 text-xs font-medium text-primary transition hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {isTrainingLocally ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Laptop className="h-3.5 w-3.5" />}
-                {isTrainingLocally ? dict.botCard.trainingLocally : dict.botCard.startLocalTraining}
-              </button>
-              {isTrainingLocally && trainingStatus && (
-                <p className="truncate text-center text-[11px] text-slate-500" title={trainingStatus}>
-                  {trainingStatus.replace(/^=== | ===$/g, "")}
-                </p>
-              )}
-              {!isTrainingLocally && (
+            bot.strategyType === "FREQAI" ? (
+              <>
                 <button
                   type="button"
-                  onClick={() => handleStartLocalTraining(true)}
-                  className="w-full text-center text-[11px] text-slate-500 transition hover:text-primary"
+                  onClick={() => handleStartLocalTraining()}
+                  disabled={isTrainingLocally}
+                  className="flex w-full items-center justify-center gap-2 rounded-lg border border-primary/40 px-3 py-2 text-xs font-medium text-primary transition hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  {dict.botCard.retrainLocally}
+                  {isTrainingLocally ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Laptop className="h-3.5 w-3.5" />}
+                  {isTrainingLocally ? dict.botCard.trainingLocally : dict.botCard.startLocalTraining}
                 </button>
-              )}
-            </>
+                {isTrainingLocally && trainingStatus && (
+                  <p className="truncate text-center text-[11px] text-slate-500" title={trainingStatus}>
+                    {trainingStatus.replace(/^=== | ===$/g, "")}
+                  </p>
+                )}
+                {!isTrainingLocally && (
+                  <button
+                    type="button"
+                    onClick={() => handleStartLocalTraining(true)}
+                    className="w-full text-center text-[11px] text-slate-500 transition hover:text-primary"
+                  >
+                    {dict.botCard.retrainLocally}
+                  </button>
+                )}
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={handleRunLocalBacktest}
+                  disabled={isBacktesting}
+                  className="flex w-full items-center justify-center gap-2 rounded-lg border border-primary/40 px-3 py-2 text-xs font-medium text-primary transition hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {isBacktesting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <BarChart3 className="h-3.5 w-3.5" />}
+                  {isBacktesting
+                    ? dict.backtestResults.running
+                    : backtestResult
+                      ? dict.backtestResults.rerunBacktest
+                      : dict.backtestResults.runBacktest}
+                </button>
+                {isBacktesting && backtestStatus && (
+                  <p className="truncate text-center text-[11px] text-slate-500" title={backtestStatus}>
+                    {backtestStatus.replace(/^=== | ===$/g, "")}
+                  </p>
+                )}
+              </>
+            )
           ) : (
             <p className="rounded-lg bg-background px-3 py-2 text-[11px] text-slate-500">
-              {dict.botCard.localTrainingNeedsApp}
+              {bot.strategyType === "FREQAI" ? dict.botCard.localTrainingNeedsApp : dict.backtestResults.needsApp}
             </p>
           )}
         </div>
 
-        <div>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".joblib"
-            className="hidden"
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) handleFileSelected(file);
-            }}
-          />
-          <button
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={isUploading}
-            className="flex w-full items-center justify-center gap-2 rounded-lg border border-dashed border-border px-3 py-2 text-xs font-medium text-slate-300 transition hover:border-primary hover:text-primary disabled:opacity-50"
-          >
-            {isUploading ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : bot.aiModelPath ? (
-              <CheckCircle2 className="h-3.5 w-3.5 text-primary" />
-            ) : (
-              <Upload className="h-3.5 w-3.5" />
-            )}
-            {bot.aiModelPath ? dict.botCard.modelUploaded : dict.botCard.orUploadManually}
-          </button>
-        </div>
+        {/* No model to upload for a rule-based bot — it has no .joblib,
+            ever (see StrategyType in prisma/schema.prisma). */}
+        {bot.strategyType === "FREQAI" && (
+          <div>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".joblib"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) handleFileSelected(file);
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={isUploading}
+              className="flex w-full items-center justify-center gap-2 rounded-lg border border-dashed border-border px-3 py-2 text-xs font-medium text-slate-300 transition hover:border-primary hover:text-primary disabled:opacity-50"
+            >
+              {isUploading ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : bot.aiModelPath ? (
+                <CheckCircle2 className="h-3.5 w-3.5 text-primary" />
+              ) : (
+                <Upload className="h-3.5 w-3.5" />
+              )}
+              {bot.aiModelPath ? dict.botCard.modelUploaded : dict.botCard.orUploadManually}
+            </button>
+          </div>
+        )}
 
         <div className="grid grid-cols-2 gap-2">
           <button

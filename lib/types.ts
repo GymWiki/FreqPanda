@@ -1,6 +1,11 @@
 import type { FreqAIProfileConfig } from "@/lib/strategy-presets";
 
 export type DeploymentStatus = "LOCAL" | "VPS_ACTIVE" | "INACTIVE";
+// FREQAI: the original, only-ever flow (a trained ML model, gated on a
+// .joblib upload). RULE_BASED: classic indicator strategies (see
+// lib/rule-based-presets.ts) — no model, only local download+backtest.
+// Fixed at creation time — see StrategyType in prisma/schema.prisma.
+export type StrategyType = "FREQAI" | "RULE_BASED";
 // "Try before you risk": every bot is born (and stays) in
 // TRAINING_PAPER_TRADE until it clears the Go Live flow — see the enum
 // doc comment in prisma/schema.prisma for the full state machine.
@@ -37,7 +42,10 @@ export interface BotConfigurationDTO {
   exchangeConnection: { id: string; exchangeName: string; verified: boolean } | null;
   strategy: string;
   strategyCode: string;
-  freqaiConfig: FreqAIProfileConfig;
+  strategyType: StrategyType;
+  // Only present when strategyType is "FREQAI" — null for a RULE_BASED bot,
+  // which has no AI behavior to configure (see StrategyType above).
+  freqaiConfig: FreqAIProfileConfig | null;
   autoSelectCoins: boolean;
   // Only meaningful when autoSelectCoins is true — how many top-liquid
   // USDT pairs VolumePairList should hand to FreqAI (see

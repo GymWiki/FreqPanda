@@ -2,26 +2,32 @@
 
 import { useId, useState, type FormEvent } from "react";
 import { Loader2, Plus, X } from "lucide-react";
-import type { BotConfigurationDTO } from "@/lib/types";
+import type { BotConfigurationDTO, StrategyType } from "@/lib/types";
 import { InfoTooltip } from "@/components/ui/Tooltip";
 import { StrategyPicker } from "@/components/ui/StrategyPicker";
+import { RuleBasedPicker } from "@/components/ui/RuleBasedPicker";
 import { PairSelector } from "@/components/ui/PairSelector";
 import { Switch } from "@/components/ui/Switch";
 import { PairCountSlider } from "@/components/ui/PairCountSlider";
 import { STRATEGY_PRESETS, type StrategyPreset } from "@/lib/strategy-presets";
+import { RULE_BASED_PRESETS, type RuleBasedPreset } from "@/lib/rule-based-presets";
 import { AUTO_PAIRLIST_SIZE_DEFAULT } from "@/lib/training-timerange";
 import { apiFetch, toErrorMessage } from "@/lib/api-client";
 import { useDictionary } from "@/components/I18nProvider";
+import { cn } from "@/lib/utils";
 
 interface NewBotDialogProps {
   onCreated: (bot: BotConfigurationDTO) => void;
 }
 
 const DEFAULT_STRATEGY = STRATEGY_PRESETS[0];
+const DEFAULT_RULE_BASED_STRATEGY = RULE_BASED_PRESETS[0];
 
 const EMPTY_FORM = {
   botName: "",
+  strategyType: "FREQAI" as StrategyType,
   strategyId: DEFAULT_STRATEGY.id,
+  ruleBasedStrategyId: DEFAULT_RULE_BASED_STRATEGY.id,
   autoSelectCoins: true,
   autoSelectPairCount: AUTO_PAIRLIST_SIZE_DEFAULT,
   pairs: ["BTC/USDT", "ETH/USDT"] as string[],
@@ -42,6 +48,9 @@ export function NewBotDialog({ onCreated }: NewBotDialogProps) {
 
   const selectedStrategy: StrategyPreset =
     STRATEGY_PRESETS.find((s) => s.id === form.strategyId) ?? DEFAULT_STRATEGY;
+  const selectedRuleBasedStrategy: RuleBasedPreset =
+    RULE_BASED_PRESETS.find((s) => s.id === form.ruleBasedStrategyId) ?? DEFAULT_RULE_BASED_STRATEGY;
+  const isRuleBased = form.strategyType === "RULE_BASED";
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -59,9 +68,13 @@ export function NewBotDialog({ onCreated }: NewBotDialogProps) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           botName: form.botName,
-          strategy: selectedStrategy.className,
-          strategyCode: selectedStrategy.code,
-          freqaiConfig: selectedStrategy.freqaiConfig,
+          strategyType: form.strategyType,
+          strategy: isRuleBased ? selectedRuleBasedStrategy.className : selectedStrategy.className,
+          strategyCode: isRuleBased ? selectedRuleBasedStrategy.code : selectedStrategy.code,
+          // Omitted entirely for a rule-based bot — the API rejects a
+          // freqaiConfig on a RULE_BASED bot outright (see
+          // app/api/bots/route.ts), it doesn't just ignore one.
+          freqaiConfig: isRuleBased ? undefined : selectedStrategy.freqaiConfig,
           autoSelectCoins: form.autoSelectCoins,
           autoSelectPairCount: form.autoSelectPairCount,
           pairWhitelist: form.autoSelectCoins ? undefined : form.pairs.join(","),
@@ -115,11 +128,49 @@ export function NewBotDialog({ onCreated }: NewBotDialogProps) {
               />
             </Field>
 
-            <FieldGroup label={dict.newBot.aiBehaviorLabel} tooltip={dict.newBot.aiBehaviorTooltip}>
-              <StrategyPicker
-                selectedId={form.strategyId}
-                onSelect={(preset) => setForm({ ...form, strategyId: preset.id })}
-              />
+            <FieldGroup label={dict.newBot.botTypeLabel}>
+              <div role="radiogroup" aria-label={dict.newBot.botTypeLabel} className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                {(["FREQAI", "RULE_BASED"] as const).map((type) => {
+                  const checked = form.strategyType === type;
+                  return (
+                    <button
+                      key={type}
+                      type="button"
+                      role="radio"
+                      aria-checked={checked}
+                      onClick={() => setForm({ ...form, strategyType: type })}
+                      className={cn(
+                        "flex flex-col gap-1 rounded-lg border p-3 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50",
+                        checked ? "border-primary bg-primary/10" : "border-border bg-background hover:border-primary/40",
+                      )}
+                    >
+                      <span className={cn("text-sm font-semibold", checked ? "text-primary" : "text-slate-100")}>
+                        {type === "FREQAI" ? dict.newBot.botTypeFreqAI : dict.newBot.botTypeRuleBased}
+                      </span>
+                      <p className="text-xs leading-relaxed text-slate-400">
+                        {type === "FREQAI" ? dict.newBot.botTypeFreqAIDescription : dict.newBot.botTypeRuleBasedDescription}
+                      </p>
+                    </button>
+                  );
+                })}
+              </div>
+            </FieldGroup>
+
+            <FieldGroup
+              label={isRuleBased ? dict.newBot.ruleBasedStrategyLabel : dict.newBot.aiBehaviorLabel}
+              tooltip={isRuleBased ? undefined : dict.newBot.aiBehaviorTooltip}
+            >
+              {isRuleBased ? (
+                <RuleBasedPicker
+                  selectedId={form.ruleBasedStrategyId}
+                  onSelect={(preset) => setForm({ ...form, ruleBasedStrategyId: preset.id })}
+                />
+              ) : (
+                <StrategyPicker
+                  selectedId={form.strategyId}
+                  onSelect={(preset) => setForm({ ...form, strategyId: preset.id })}
+                />
+              )}
             </FieldGroup>
 
             <FieldGroup label={dict.newBot.pairsLabel}>

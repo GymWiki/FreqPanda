@@ -14,6 +14,7 @@ export const botSelect = {
   },
   strategy: true,
   strategyCode: true,
+  strategyType: true,
   freqaiConfig: true,
   autoSelectCoins: true,
   autoSelectPairCount: true,
@@ -36,11 +37,13 @@ type BotRow = Prisma.BotConfigurationGetPayload<{ select: typeof botSelect }>;
 
 // freqaiConfig is stored as Prisma's broad JsonValue — cast to the specific
 // shape here, at the one place raw DB rows become the app-wide DTO, rather
-// than at every call site.
+// than at every call site. Only ever non-null for a FREQAI bot — a DB check
+// constraint enforces that pairing (see the migration that added
+// strategyType in prisma/schema.prisma).
 export function toBotDTO(bot: BotRow): BotConfigurationDTO {
   const { freqaiConfig, ...rest } = bot;
   return {
     ...rest,
-    freqaiConfig: freqaiConfig as unknown as FreqAIProfileConfig,
+    freqaiConfig: freqaiConfig as unknown as FreqAIProfileConfig | null,
   };
 }
