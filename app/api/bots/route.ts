@@ -148,7 +148,15 @@ export const POST = withErrorHandling(async (req: NextRequest) => {
       strategy,
       strategyCode,
       strategyType,
-      freqaiConfig: strategyType === "FREQAI" ? (freqaiConfig as Prisma.InputJsonValue) : Prisma.JsonNull,
+      // Prisma.DbNull, NOT Prisma.JsonNull, for a rule-based bot — the two
+      // are easy to confuse but write completely different things to a
+      // jsonb column: JsonNull stores the JSON scalar `null` (the column is
+      // NOT SQL NULL, just holds a null-valued JSON document), DbNull
+      // stores actual SQL NULL. The bot_configurations_freqai_config_matches_type
+      // check constraint requires real SQL NULL for a RULE_BASED bot (see
+      // the migration that added strategyType) — JsonNull here made every
+      // rule-based bot creation fail that constraint.
+      freqaiConfig: strategyType === "FREQAI" ? (freqaiConfig as Prisma.InputJsonValue) : Prisma.DbNull,
       autoSelectCoins: autoSelect,
       autoSelectPairCount: autoSelectPairCount ?? AUTO_PAIRLIST_SIZE_DEFAULT,
       pairWhitelist: autoSelect ? null : pairWhitelist,
