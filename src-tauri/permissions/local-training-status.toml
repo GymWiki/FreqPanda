@@ -1,0 +1,14 @@
+# App-own command permission (unprefixed identifier, see capabilities/default.json)
+# — Tauri v2 gates every invoke() call, including the app's own
+# #[tauri::command] functions, not just plugin commands. Without this,
+# local_training_status (src-tauri/src/main.rs) is registered in
+# invoke_handler! but unreachable from the frontend: "Command
+# local_training_status not allowed by ACL". Shipped without this for a
+# while, silently masked because its only callers (components/BotCard.tsx,
+# components/BotDetailView.tsx) wrap the invoke in a try/catch with no
+# user-facing error on failure — caught only once run_local_backtest hit
+# the identical gap and its own caller does surface invoke errors.
+[[permission]]
+identifier = "allow-local-training-status"
+description = "Enables the local_training_status command without any pre-configured scope."
+commands.allow = ["local_training_status"]

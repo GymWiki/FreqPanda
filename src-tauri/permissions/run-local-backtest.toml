@@ -1,0 +1,10 @@
+# App-own command permission (unprefixed identifier, see capabilities/default.json)
+# — Tauri v2 gates every invoke() call, including the app's own
+# #[tauri::command] functions, not just plugin commands. Without this,
+# run_local_backtest (src-tauri/src/main.rs) is registered in
+# invoke_handler! but unreachable from the frontend: "Command
+# run_local_backtest not allowed by ACL".
+[[permission]]
+identifier = "allow-run-local-backtest"
+description = "Enables the run_local_backtest command without any pre-configured scope."
+commands.allow = ["run_local_backtest"]
