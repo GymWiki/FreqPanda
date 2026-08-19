@@ -55,13 +55,19 @@ interface BotDetailViewProps {
 // already uses for local_training_status's inline `{ state: string }`
 // result type, rather than a shared DTO — this never crosses the server
 // API, only the Tauri invoke boundary.
-// Every field is nullable: read_backtest_stats degrades a single
-// missing/renamed field to null rather than failing the whole backtest —
-// freqtrade's own stats JSON shape has already shifted out from under an
-// earlier, unverified assumption here once (see that function's doc
-// comment) — so the UI must be able to show "not available" for one stat
-// without losing the rest of the card.
+// totalTrades is always present (run_local_backtest/read_backtest_stats
+// treats it as required and errors out otherwise) — it exists specifically
+// so this component can tell "a real backtest that closed zero trades"
+// apart from "the parser couldn't find this stat", which would otherwise
+// both render as an identical, misleading 0%/0W-0L-0D tile (see
+// read_backtest_stats' own doc comment for the regression this closes).
+// Every OTHER field is nullable: a single missing/renamed field degrades to
+// null rather than failing the whole backtest — freqtrade's own stats JSON
+// shape has already shifted out from under an earlier, unverified
+// assumption here once — so the UI still shows "not available" for one
+// stat without losing the rest of the card.
 interface BacktestSummary {
+  totalTrades: number;
   totalProfitPct: number | null;
   wins: number | null;
   losses: number | null;
@@ -555,42 +561,52 @@ export function BotDetailView({ bot: initialBot }: BotDetailViewProps) {
             {dict.backtestResults.heading}
           </div>
           {backtestResult ? (
-            <>
-              <div className="grid grid-cols-2 gap-2">
-                <div className="rounded-lg bg-background px-3 py-2">
-                  <p className="text-[11px] text-slate-500">{dict.backtestResults.totalProfit}</p>
-                  {backtestResult.totalProfitPct !== null ? (
-                    <p className={`text-sm font-semibold ${backtestResult.totalProfitPct >= 0 ? "text-primary" : "text-red-400"}`}>
-                      {backtestResult.totalProfitPct >= 0 ? "+" : ""}
-                      {backtestResult.totalProfitPct.toFixed(2)}%
+            backtestResult.totalTrades === 0 ? (
+              // A real, structurally valid backtest that happened to close
+              // zero trades reads identically to a broken parse if all we
+              // show is 0%/0W-0L-0D tiles — say so plainly instead, using
+              // totalTrades (always present, never silently defaulted; see
+              // this file's own BacktestSummary doc comment) as the one
+              // field that actually distinguishes the two.
+              <p className="text-xs text-slate-500">{dict.backtestResults.zeroTrades}</p>
+            ) : (
+              <>
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="rounded-lg bg-background px-3 py-2">
+                    <p className="text-[11px] text-slate-500">{dict.backtestResults.totalProfit}</p>
+                    {backtestResult.totalProfitPct !== null ? (
+                      <p className={`text-sm font-semibold ${backtestResult.totalProfitPct >= 0 ? "text-primary" : "text-red-400"}`}>
+                        {backtestResult.totalProfitPct >= 0 ? "+" : ""}
+                        {backtestResult.totalProfitPct.toFixed(2)}%
+                      </p>
+                    ) : (
+                      <p className="text-sm font-semibold text-slate-500">{dict.backtestResults.notAvailable}</p>
+                    )}
+                  </div>
+                  <div className="rounded-lg bg-background px-3 py-2">
+                    <p className="text-[11px] text-slate-500">{dict.backtestResults.winRate}</p>
+                    <p className="text-sm font-semibold text-slate-100">
+                      {backtestResult.winRate !== null ? `${(backtestResult.winRate * 100).toFixed(0)}%` : dict.backtestResults.notAvailable}
                     </p>
-                  ) : (
-                    <p className="text-sm font-semibold text-slate-500">{dict.backtestResults.notAvailable}</p>
-                  )}
+                  </div>
+                  <div className="rounded-lg bg-background px-3 py-2">
+                    <p className="text-[11px] text-slate-500">{dict.backtestResults.trades}</p>
+                    <p className="text-sm font-semibold text-slate-100">
+                      {backtestResult.wins !== null && backtestResult.losses !== null && backtestResult.draws !== null
+                        ? dict.backtestResults.winLossDraw(backtestResult.wins, backtestResult.losses, backtestResult.draws)
+                        : dict.backtestResults.notAvailable}
+                    </p>
+                  </div>
+                  <div className="rounded-lg bg-background px-3 py-2">
+                    <p className="text-[11px] text-slate-500">{dict.backtestResults.maxDrawdown}</p>
+                    <p className="text-sm font-semibold text-amber-300">
+                      {backtestResult.maxDrawdownPct !== null ? `-${backtestResult.maxDrawdownPct.toFixed(2)}%` : dict.backtestResults.notAvailable}
+                    </p>
+                  </div>
                 </div>
-                <div className="rounded-lg bg-background px-3 py-2">
-                  <p className="text-[11px] text-slate-500">{dict.backtestResults.winRate}</p>
-                  <p className="text-sm font-semibold text-slate-100">
-                    {backtestResult.winRate !== null ? `${(backtestResult.winRate * 100).toFixed(0)}%` : dict.backtestResults.notAvailable}
-                  </p>
-                </div>
-                <div className="rounded-lg bg-background px-3 py-2">
-                  <p className="text-[11px] text-slate-500">{dict.backtestResults.trades}</p>
-                  <p className="text-sm font-semibold text-slate-100">
-                    {backtestResult.wins !== null && backtestResult.losses !== null && backtestResult.draws !== null
-                      ? dict.backtestResults.winLossDraw(backtestResult.wins, backtestResult.losses, backtestResult.draws)
-                      : dict.backtestResults.notAvailable}
-                  </p>
-                </div>
-                <div className="rounded-lg bg-background px-3 py-2">
-                  <p className="text-[11px] text-slate-500">{dict.backtestResults.maxDrawdown}</p>
-                  <p className="text-sm font-semibold text-amber-300">
-                    {backtestResult.maxDrawdownPct !== null ? `-${backtestResult.maxDrawdownPct.toFixed(2)}%` : dict.backtestResults.notAvailable}
-                  </p>
-                </div>
-              </div>
-              <p className="text-[11px] text-slate-500">{dict.backtestResults.disclaimer}</p>
-            </>
+                <p className="text-[11px] text-slate-500">{dict.backtestResults.disclaimer}</p>
+              </>
+            )
           ) : (
             <p className="text-xs text-slate-500">{dict.backtestResults.noneYet}</p>
           )}

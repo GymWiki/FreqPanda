@@ -166,6 +166,8 @@ export const en: Dictionary = {
     noneYet: "No backtest has been run for this bot yet.",
     winLossDraw: (wins: number, losses: number, draws: number) => `${wins}W / ${losses}L / ${draws}D`,
     notAvailable: "N/A",
+    zeroTrades:
+      "This backtest closed zero trades in the chosen period — this strategy's entry rules simply never triggered for the selected coins. Try different coins or a less strict strategy.",
   },
 
   budgetSlider: {

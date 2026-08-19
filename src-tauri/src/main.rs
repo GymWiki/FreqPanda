@@ -414,15 +414,27 @@ fn training_container_name(bot_id: &str, step: &str) -> String {
     format!("freqpanda-train-{bot_id}-{step}")
 }
 
-// Every field is optional: read_backtest_stats degrades per-field rather
-// than failing the whole backtest on one missing/renamed key (see its own
-// doc comment for why field names and even units have already shifted out
-// from under an earlier, unverified assumption once). The frontend shows
-// a plain "not available" fallback for whichever field comes back None
-// instead of losing the rest of the card.
+// total_trades is the one REQUIRED field (read_backtest_stats errors out if
+// it's missing) — everything else is optional and degrades per-field
+// instead of failing the whole backtest on one missing/renamed key (see
+// read_backtest_stats' own doc comment for why field names and units have
+// already shifted out from under an earlier, unverified assumption once).
+// total_trades exists specifically to remove the ambiguity that caused the
+// SECOND round of this bug: every derived stat (profit, winrate, drawdown)
+// legitimately reads as exactly 0 for a real zero-trade backtest — visually
+// indistinguishable in the UI from "the parser silently defaulted to 0" if
+// nothing else is checked. total_trades is always present in freqtrade's
+// own well-formed output regardless of trade count (confirmed against
+// generate_strategy_stats: `"total_trades": len(results)`, set
+// unconditionally), so if IT can't be found, that's a genuine structural
+// parsing failure worth a hard error — and if it's found and reads 0, that
+// is a real "no trades" result, not a parsing bug wearing a 0% mask. The
+// frontend uses this field to choose which of those two to show, instead
+// of ever presenting a bare 0%/0W-0L-0D tile that reads as broken either way.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BacktestSummary {
+    total_trades: i64,
     total_profit_pct: Option<f64>,
     wins: Option<i64>,
     losses: Option<i64>,
@@ -670,14 +682,24 @@ fn read_backtest_stats(user_data_dir: &Path, strategy: &str) -> Result<BacktestS
         .and_then(|s| s.get(strategy))
         .ok_or_else(|| format!("backtest stats have no results for strategy '{strategy}'"))?;
 
-    // Best-effort per field, deliberately — a single renamed/missing key
-    // (freqtrade has changed this dict's shape before, see this function's
-    // own doc comment) degrades that one stat to None/"not available"
-    // rather than losing the whole backtest card over it.
+    // total_trades is required — see BacktestSummary's own doc comment for
+    // why: it's the one field that lets the frontend tell "genuinely zero
+    // trades" apart from "the parser couldn't find this stat", both of
+    // which would otherwise render as an identical, ambiguous 0.
+    let total_trades = strat
+        .get("total_trades")
+        .and_then(|v| v.as_i64())
+        .ok_or("backtest stats missing required field 'total_trades'")?;
+
+    // Best-effort per field, deliberately, for everything else — a single
+    // renamed/missing key (freqtrade has changed this dict's shape before,
+    // see this function's own doc comment) degrades that one stat to
+    // None/"not available" rather than losing the whole backtest card.
     let get_f64 = |key: &str| strat.get(key).and_then(|v| v.as_f64());
     let get_i64 = |key: &str| strat.get(key).and_then(|v| v.as_i64());
 
     Ok(BacktestSummary {
+        total_trades,
         total_profit_pct: get_f64("profit_total").map(|ratio| ratio * 100.0),
         wins: get_i64("wins"),
         losses: get_i64("losses"),
@@ -738,6 +760,7 @@ mod read_backtest_stats_tests {
             &dir,
             "SimpleRsiMacdStrategy",
             serde_json::json!({
+                "total_trades": 12,
                 "profit_total": 0.125,
                 "wins": 8,
                 "losses": 3,
@@ -748,6 +771,7 @@ mod read_backtest_stats_tests {
         );
 
         let summary: BacktestSummary = read_backtest_stats(&dir, "SimpleRsiMacdStrategy").unwrap();
+        assert_eq!(summary.total_trades, 12);
         // Compared against the same *100.0 computation read_backtest_stats
         // itself does, not a hand-typed decimal literal — binary floating
         // point doesn't represent 0.125*100 and a separately-written "12.5"
@@ -770,6 +794,7 @@ mod read_backtest_stats_tests {
             &dir,
             "BollingerMeanReversionStrategy",
             serde_json::json!({
+                "total_trades": 5,
                 "profit_total": -0.021,
                 "wins": 1,
                 "losses": 4,
@@ -787,14 +812,17 @@ mod read_backtest_stats_tests {
 
     #[test]
     fn missing_individual_fields_degrade_to_none_instead_of_failing() {
-        // The actual regression this fix closes: a renamed/missing field
-        // (e.g. "profit_total_pct" never having existed) must not blow up
-        // the whole backtest result — only that one field goes missing.
+        // The actual regression the first round of this fix closed: a
+        // renamed/missing field (e.g. "profit_total_pct" never having
+        // existed) must not blow up the whole backtest result — only that
+        // one field goes missing. total_trades is still required (see
+        // below for what happens when even that is absent).
         let dir = std::env::temp_dir().join(format!("freqpanda-backtest-stats-test-{}", uuid_like()));
         write_fixture(
             &dir,
             "SimpleRsiMacdStrategy",
             serde_json::json!({
+                "total_trades": 3,
                 "wins": 2,
                 "losses": 1,
                 // profit_total, draws, winrate, and any drawdown field are
@@ -803,6 +831,7 @@ mod read_backtest_stats_tests {
         );
 
         let summary = read_backtest_stats(&dir, "SimpleRsiMacdStrategy").unwrap();
+        assert_eq!(summary.total_trades, 3);
         assert_eq!(summary.wins, Some(2));
         assert_eq!(summary.losses, Some(1));
         assert_eq!(summary.total_profit_pct, None);
@@ -814,11 +843,66 @@ mod read_backtest_stats_tests {
     }
 
     #[test]
+    fn a_genuine_zero_trade_backtest_reports_total_trades_zero_not_an_error() {
+        // The exact scenario this second round of the fix is about: a real
+        // backtest that closed zero trades produces this shape — every
+        // derived stat legitimately 0 — from freqtrade's own
+        // generate_trading_stats "if len(results) == 0" branch and
+        // generate_strategy_stats' profit_total = 0/start_balance. This
+        // must parse cleanly and report total_trades: 0, not an error and
+        // not confuse this with a parsing failure.
+        let dir = std::env::temp_dir().join(format!("freqpanda-backtest-stats-test-{}", uuid_like()));
+        write_fixture(
+            &dir,
+            "TrendVolumeStrategy",
+            serde_json::json!({
+                "total_trades": 0,
+                "profit_total": 0.0,
+                "wins": 0,
+                "losses": 0,
+                "draws": 0,
+                "winrate": 0,
+                "max_relative_drawdown": 0.0,
+            }),
+        );
+
+        let summary = read_backtest_stats(&dir, "TrendVolumeStrategy").unwrap();
+        assert_eq!(summary.total_trades, 0);
+        assert_eq!(summary.total_profit_pct, Some(0.0));
+        assert_eq!(summary.wins, Some(0));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_total_trades_is_a_hard_error_not_a_silent_zero() {
+        // total_trades is the one field this function refuses to guess at
+        // — a genuinely unparseable/restructured result must surface as a
+        // clear error, never as a BacktestSummary that looks identical to
+        // a real zero-trade run (see BacktestSummary's own doc comment).
+        let dir = std::env::temp_dir().join(format!("freqpanda-backtest-stats-test-{}", uuid_like()));
+        write_fixture(
+            &dir,
+            "SimpleRsiMacdStrategy",
+            serde_json::json!({
+                "profit_total": 0.05,
+                "wins": 3,
+                // total_trades deliberately absent.
+            }),
+        );
+
+        let err = read_backtest_stats(&dir, "SimpleRsiMacdStrategy").unwrap_err();
+        assert!(err.contains("total_trades"), "error should name the missing required field, got: {err}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn errors_clearly_when_the_strategy_name_does_not_match() {
         // This stays a hard error — a wrong/missing strategy key means the
         // archive has no results at all for this bot, not just one field.
         let dir = std::env::temp_dir().join(format!("freqpanda-backtest-stats-test-{}", uuid_like()));
-        write_fixture(&dir, "SimpleRsiMacdStrategy", serde_json::json!({ "profit_total": 0.01 }));
+        write_fixture(&dir, "SimpleRsiMacdStrategy", serde_json::json!({ "total_trades": 1, "profit_total": 0.01 }));
 
         let err = read_backtest_stats(&dir, "SomeOtherStrategy").unwrap_err();
         assert!(err.contains("SomeOtherStrategy"), "error should name the requested strategy, got: {err}");

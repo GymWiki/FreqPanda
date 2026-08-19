@@ -171,6 +171,8 @@ export const nl = {
     noneYet: "Nog geen backtest uitgevoerd voor deze bot.",
     winLossDraw: (wins: number, losses: number, draws: number) => `${wins}W / ${losses}L / ${draws}D`,
     notAvailable: "N.v.t.",
+    zeroTrades:
+      "Deze backtest sloot geen enkele trade in de gekozen periode — de instapregels van deze strategie kwamen simpelweg niet voor bij de geselecteerde munten. Probeer eventueel andere munten of een minder strikte strategie.",
   },
 
   budgetSlider: {

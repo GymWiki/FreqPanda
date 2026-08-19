@@ -35,11 +35,19 @@ export interface RuleBasedPreset {
   className: string;
   code: string;
   /**
-   * Minimum warm-up candles this strategy's own indicators need before
-   * their lookback windows are fully populated (no partial-NaN values) —
-   * mirrors FreqAIFeatureConfig.startupCandleCount's role for FreqAI
-   * presets, and is folded the same way into how much history
-   * run_local_backtest downloads before backtesting.
+   * Must equal the `startup_candle_count` class attribute baked into
+   * `code` (in units of baseTimeframe candles — see TrendVolumeStrategy's
+   * own comment for why that's a real, easy-to-get-wrong distinction once
+   * an informative pair on a different timeframe is involved). Kept here
+   * purely as a visible cross-check against `code` drifting out of sync
+   * with itself — unlike FreqAIFeatureConfig.startupCandleCount in
+   * lib/strategy-presets.ts, this value is NOT currently read by
+   * run_local_backtest to size the download window: RULE_BASED_BACKTEST_
+   * PERIOD_DAYS in src-tauri/src/main.rs is a fixed 90-day constant,
+   * comfortably larger than any of these presets' warm-up needs today, so
+   * there was nothing to wire up yet. If a future preset ever needed more
+   * than ~90 days of warm-up, this field would need to actually flow into
+   * that constant — it doesn't yet.
    */
   startupCandleCount: number;
 }
@@ -134,12 +142,18 @@ class TrendVolumeStrategy(IStrategy):
     trailing_only_offset_is_reached = True
     process_only_new_candles = True
 
-    # Generous warm-up (the 1h informative pair's own 200-candle EMA is the
-    # widest lookback here) so every indicator is fully computed before the
-    # first real signal — must stay in sync with startupCandleCount in
-    # lib/rule-based-presets.ts, which src-tauri/src/main.rs also uses to
-    # size how much history a local backtest run downloads.
-    startup_candle_count = 100
+    # startup_candle_count is in units of THIS strategy's own timeframe
+    # (15m), not the informative one — freqtrade converts nothing here.
+    # The widest real lookback is ema200 on the 1h informative pair: 200
+    # HOURS, i.e. 200*4 = 800 fifteen-minute candles, not 200 fifteen-minute
+    # candles. A too-low value here (this used to say 100 — ~25 hours, only
+    # 1/8th of what ema200_1h actually needs) makes freqtrade start
+    # evaluating entry signals while ema50_1h/ema200_1h are still NaN for
+    # every pair, so the ema50_1h > ema200_1h comparison never has a real
+    # answer during that stretch — not a crash, just entries that can never fire until
+    # real warm-up completes on its own well into the run. Must stay in
+    # sync with startupCandleCount in lib/rule-based-presets.ts.
+    startup_candle_count = 850
 
     def informative_pairs(self):
         pairs = self.dp.current_whitelist()
@@ -250,7 +264,7 @@ export const RULE_BASED_PRESETS: RuleBasedPreset[] = [
     informativeTimeframe: "1h",
     className: "TrendVolumeStrategy",
     code: TREND_VOLUME_CODE,
-    startupCandleCount: 100,
+    startupCandleCount: 850,
   },
   {
     id: "rb-bollinger",
