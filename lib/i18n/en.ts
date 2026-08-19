@@ -165,6 +165,7 @@ export const en: Dictionary = {
     needsApp: "Backtesting requires the desktop app — download it from the website.",
     noneYet: "No backtest has been run for this bot yet.",
     winLossDraw: (wins: number, losses: number, draws: number) => `${wins}W / ${losses}L / ${draws}D`,
+    notAvailable: "N/A",
   },
 
   budgetSlider: {

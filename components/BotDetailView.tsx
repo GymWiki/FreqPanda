@@ -55,13 +55,19 @@ interface BotDetailViewProps {
 // already uses for local_training_status's inline `{ state: string }`
 // result type, rather than a shared DTO — this never crosses the server
 // API, only the Tauri invoke boundary.
+// Every field is nullable: read_backtest_stats degrades a single
+// missing/renamed field to null rather than failing the whole backtest —
+// freqtrade's own stats JSON shape has already shifted out from under an
+// earlier, unverified assumption here once (see that function's doc
+// comment) — so the UI must be able to show "not available" for one stat
+// without losing the rest of the card.
 interface BacktestSummary {
-  totalProfitPct: number;
-  wins: number;
-  losses: number;
-  draws: number;
-  winRate: number;
-  maxDrawdownPct: number;
+  totalProfitPct: number | null;
+  wins: number | null;
+  losses: number | null;
+  draws: number | null;
+  winRate: number | null;
+  maxDrawdownPct: number | null;
 }
 
 // Everything that used to live directly on the compact dashboard card
@@ -553,24 +559,34 @@ export function BotDetailView({ bot: initialBot }: BotDetailViewProps) {
               <div className="grid grid-cols-2 gap-2">
                 <div className="rounded-lg bg-background px-3 py-2">
                   <p className="text-[11px] text-slate-500">{dict.backtestResults.totalProfit}</p>
-                  <p className={`text-sm font-semibold ${backtestResult.totalProfitPct >= 0 ? "text-primary" : "text-red-400"}`}>
-                    {backtestResult.totalProfitPct >= 0 ? "+" : ""}
-                    {backtestResult.totalProfitPct.toFixed(2)}%
-                  </p>
+                  {backtestResult.totalProfitPct !== null ? (
+                    <p className={`text-sm font-semibold ${backtestResult.totalProfitPct >= 0 ? "text-primary" : "text-red-400"}`}>
+                      {backtestResult.totalProfitPct >= 0 ? "+" : ""}
+                      {backtestResult.totalProfitPct.toFixed(2)}%
+                    </p>
+                  ) : (
+                    <p className="text-sm font-semibold text-slate-500">{dict.backtestResults.notAvailable}</p>
+                  )}
                 </div>
                 <div className="rounded-lg bg-background px-3 py-2">
                   <p className="text-[11px] text-slate-500">{dict.backtestResults.winRate}</p>
-                  <p className="text-sm font-semibold text-slate-100">{(backtestResult.winRate * 100).toFixed(0)}%</p>
+                  <p className="text-sm font-semibold text-slate-100">
+                    {backtestResult.winRate !== null ? `${(backtestResult.winRate * 100).toFixed(0)}%` : dict.backtestResults.notAvailable}
+                  </p>
                 </div>
                 <div className="rounded-lg bg-background px-3 py-2">
                   <p className="text-[11px] text-slate-500">{dict.backtestResults.trades}</p>
                   <p className="text-sm font-semibold text-slate-100">
-                    {dict.backtestResults.winLossDraw(backtestResult.wins, backtestResult.losses, backtestResult.draws)}
+                    {backtestResult.wins !== null && backtestResult.losses !== null && backtestResult.draws !== null
+                      ? dict.backtestResults.winLossDraw(backtestResult.wins, backtestResult.losses, backtestResult.draws)
+                      : dict.backtestResults.notAvailable}
                   </p>
                 </div>
                 <div className="rounded-lg bg-background px-3 py-2">
                   <p className="text-[11px] text-slate-500">{dict.backtestResults.maxDrawdown}</p>
-                  <p className="text-sm font-semibold text-amber-300">-{backtestResult.maxDrawdownPct.toFixed(2)}%</p>
+                  <p className="text-sm font-semibold text-amber-300">
+                    {backtestResult.maxDrawdownPct !== null ? `-${backtestResult.maxDrawdownPct.toFixed(2)}%` : dict.backtestResults.notAvailable}
+                  </p>
                 </div>
               </div>
               <p className="text-[11px] text-slate-500">{dict.backtestResults.disclaimer}</p>

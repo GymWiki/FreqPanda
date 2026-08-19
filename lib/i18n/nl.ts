@@ -170,6 +170,7 @@ export const nl = {
     needsApp: "Backtesten vereist de desktop-app — download 'm op de website.",
     noneYet: "Nog geen backtest uitgevoerd voor deze bot.",
     winLossDraw: (wins: number, losses: number, draws: number) => `${wins}W / ${losses}L / ${draws}D`,
+    notAvailable: "N.v.t.",
   },
 
   budgetSlider: {

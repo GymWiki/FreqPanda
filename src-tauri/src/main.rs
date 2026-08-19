@@ -414,15 +414,21 @@ fn training_container_name(bot_id: &str, step: &str) -> String {
     format!("freqpanda-train-{bot_id}-{step}")
 }
 
+// Every field is optional: read_backtest_stats degrades per-field rather
+// than failing the whole backtest on one missing/renamed key (see its own
+// doc comment for why field names and even units have already shifted out
+// from under an earlier, unverified assumption once). The frontend shows
+// a plain "not available" fallback for whichever field comes back None
+// instead of losing the rest of the card.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BacktestSummary {
-    total_profit_pct: f64,
-    wins: i64,
-    losses: i64,
-    draws: i64,
-    win_rate: f64,
-    max_drawdown_pct: f64,
+    total_profit_pct: Option<f64>,
+    wins: Option<i64>,
+    losses: Option<i64>,
+    draws: Option<i64>,
+    win_rate: Option<f64>,
+    max_drawdown_pct: Option<f64>,
 }
 
 // Mode B (rule-based local backtesting) — the non-FreqAI counterpart to
@@ -600,12 +606,35 @@ async fn run_local_backtest(
 // there is no plain, uncompressed JSON on disk with these numbers: freqtrade
 // writes a `.last_result.json` pointer file (`{"latest_backtest": "<zip
 // name>"}`) next to a `backtest-result-<timestamp>.zip` archive, and the
-// per-strategy stats (profit_total_pct, winrate, max_drawdown_account, ...)
-// only ever live INSIDE that zip, under an entry with the same name as the
-// zip but a `.json` extension — confirmed by reading freqtrade's own
-// optimize_reports source (store_backtest_stats/store_backtest_analysis_results)
-// rather than assumed, same audit approach as build_local_training_config's
-// own checklist.
+// per-strategy stats only ever live INSIDE that zip, under an entry with
+// the same name as the zip but a `.json` extension.
+//
+// Field names and scale below were confirmed by reading the ACTUAL
+// generate_strategy_stats/generate_trading_stats source in freqtrade's own
+// optimize/optimize_reports/optimize_reports.py (raw.githubusercontent.com,
+// `stable` branch) line by line — not summarized, not guessed from the
+// docs. That mattered: an earlier pass here assumed a "profit_total_pct"
+// key existed because of a misread summary of this same file, and shipped
+// broken ("backtest stats missing numeric field 'profit_total_pct'" on
+// every real run). The actual dict has no such key. What's really there:
+//   - "profit_total"          — a RATIO (0.125, not 12.5), from
+//                                generate_strategy_stats: profit_abs.sum() /
+//                                start_balance. No "_pct" variant exists.
+//   - "wins" / "losses" / "draws" / "winrate" — from generate_trading_stats,
+//                                merged into the same dict via **trade_stats.
+//                                winrate is also a ratio (wins / total).
+//   - "max_relative_drawdown" / "max_drawdown_account" — also RATIOS, from
+//                                data/metrics.py's calculate_max_drawdown:
+//                                (max_balance - cumulative_balance) /
+//                                max_balance. Confirmed against
+//                                optimize/optimize_reports/bt_output.py's own
+//                                console table, which formats this same
+//                                field with Python's `:.2%` specifier — that
+//                                specifier itself multiplies by 100, which
+//                                only makes sense if the underlying value is
+//                                a 0-1 ratio, not already a percentage.
+// So every ratio field below is explicitly `* 100.0` here, once, at the one
+// place this JSON is read — not left for the frontend to guess at.
 fn read_backtest_stats(user_data_dir: &Path, strategy: &str) -> Result<BacktestSummary, String> {
     let backtest_results_dir = user_data_dir.join("backtest_results");
     let last_result_path = backtest_results_dir.join(".last_result.json");
@@ -641,23 +670,27 @@ fn read_backtest_stats(user_data_dir: &Path, strategy: &str) -> Result<BacktestS
         .and_then(|s| s.get(strategy))
         .ok_or_else(|| format!("backtest stats have no results for strategy '{strategy}'"))?;
 
-    let get_f64 = |key: &str| strat.get(key).and_then(|v| v.as_f64()).ok_or_else(|| format!("backtest stats missing numeric field '{key}'"));
-    let get_i64 = |key: &str| strat.get(key).and_then(|v| v.as_i64()).ok_or_else(|| format!("backtest stats missing numeric field '{key}'"));
+    // Best-effort per field, deliberately — a single renamed/missing key
+    // (freqtrade has changed this dict's shape before, see this function's
+    // own doc comment) degrades that one stat to None/"not available"
+    // rather than losing the whole backtest card over it.
+    let get_f64 = |key: &str| strat.get(key).and_then(|v| v.as_f64());
+    let get_i64 = |key: &str| strat.get(key).and_then(|v| v.as_i64());
 
     Ok(BacktestSummary {
-        total_profit_pct: get_f64("profit_total_pct")?,
-        wins: get_i64("wins")?,
-        losses: get_i64("losses")?,
-        draws: get_i64("draws")?,
-        win_rate: get_f64("winrate")?,
-        // max_relative_drawdown is the percentage form; max_drawdown_account
-        // is an older/alternate key some freqtrade versions used for the
-        // same thing — try both rather than assume one exact version.
-        max_drawdown_pct: strat
-            .get("max_relative_drawdown")
-            .and_then(|v| v.as_f64())
-            .or_else(|| strat.get("max_drawdown_account").and_then(|v| v.as_f64()))
-            .ok_or("backtest stats missing max_relative_drawdown/max_drawdown_account")?,
+        total_profit_pct: get_f64("profit_total").map(|ratio| ratio * 100.0),
+        wins: get_i64("wins"),
+        losses: get_i64("losses"),
+        draws: get_i64("draws"),
+        win_rate: get_f64("winrate"),
+        // max_relative_drawdown ("underwater") is the metric freqtrade's own
+        // console report shows; max_drawdown_account is an older/alternate
+        // key some versions used for a similar figure — try both rather
+        // than assume one exact version, same as before, just now correctly
+        // scaled (see this function's doc comment).
+        max_drawdown_pct: get_f64("max_relative_drawdown")
+            .or_else(|| get_f64("max_drawdown_account"))
+            .map(|ratio| ratio * 100.0),
     })
 }
 
@@ -697,27 +730,35 @@ mod read_backtest_stats_tests {
 
     #[test]
     fn parses_a_well_formed_backtest_result_archive() {
+        // Shape matches the REAL generate_strategy_stats/generate_trading_stats
+        // output (see read_backtest_stats' doc comment) — profit_total and
+        // the drawdown fields are ratios, not pre-multiplied percentages.
         let dir = std::env::temp_dir().join(format!("freqpanda-backtest-stats-test-{}", uuid_like()));
         write_fixture(
             &dir,
             "SimpleRsiMacdStrategy",
             serde_json::json!({
-                "profit_total_pct": 12.5,
+                "profit_total": 0.125,
                 "wins": 8,
                 "losses": 3,
                 "draws": 1,
                 "winrate": 0.6667,
-                "max_relative_drawdown": 4.2,
+                "max_relative_drawdown": 0.042,
             }),
         );
 
         let summary: BacktestSummary = read_backtest_stats(&dir, "SimpleRsiMacdStrategy").unwrap();
-        assert_eq!(summary.total_profit_pct, 12.5);
-        assert_eq!(summary.wins, 8);
-        assert_eq!(summary.losses, 3);
-        assert_eq!(summary.draws, 1);
-        assert_eq!(summary.win_rate, 0.6667);
-        assert_eq!(summary.max_drawdown_pct, 4.2);
+        // Compared against the same *100.0 computation read_backtest_stats
+        // itself does, not a hand-typed decimal literal — binary floating
+        // point doesn't represent 0.125*100 and a separately-written "12.5"
+        // as bit-identical in general, even though they happen to coincide
+        // for these particular values.
+        assert_eq!(summary.total_profit_pct, Some(0.125 * 100.0));
+        assert_eq!(summary.wins, Some(8));
+        assert_eq!(summary.losses, Some(3));
+        assert_eq!(summary.draws, Some(1));
+        assert_eq!(summary.win_rate, Some(0.6667));
+        assert_eq!(summary.max_drawdown_pct, Some(0.042 * 100.0));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -729,25 +770,55 @@ mod read_backtest_stats_tests {
             &dir,
             "BollingerMeanReversionStrategy",
             serde_json::json!({
-                "profit_total_pct": -2.1,
+                "profit_total": -0.021,
                 "wins": 1,
                 "losses": 4,
                 "draws": 0,
                 "winrate": 0.2,
-                "max_drawdown_account": 9.9,
+                "max_drawdown_account": 0.099,
             }),
         );
 
         let summary = read_backtest_stats(&dir, "BollingerMeanReversionStrategy").unwrap();
-        assert_eq!(summary.max_drawdown_pct, 9.9);
+        assert_eq!(summary.max_drawdown_pct, Some(0.099 * 100.0));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_individual_fields_degrade_to_none_instead_of_failing() {
+        // The actual regression this fix closes: a renamed/missing field
+        // (e.g. "profit_total_pct" never having existed) must not blow up
+        // the whole backtest result — only that one field goes missing.
+        let dir = std::env::temp_dir().join(format!("freqpanda-backtest-stats-test-{}", uuid_like()));
+        write_fixture(
+            &dir,
+            "SimpleRsiMacdStrategy",
+            serde_json::json!({
+                "wins": 2,
+                "losses": 1,
+                // profit_total, draws, winrate, and any drawdown field are
+                // deliberately absent here.
+            }),
+        );
+
+        let summary = read_backtest_stats(&dir, "SimpleRsiMacdStrategy").unwrap();
+        assert_eq!(summary.wins, Some(2));
+        assert_eq!(summary.losses, Some(1));
+        assert_eq!(summary.total_profit_pct, None);
+        assert_eq!(summary.draws, None);
+        assert_eq!(summary.win_rate, None);
+        assert_eq!(summary.max_drawdown_pct, None);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn errors_clearly_when_the_strategy_name_does_not_match() {
+        // This stays a hard error — a wrong/missing strategy key means the
+        // archive has no results at all for this bot, not just one field.
         let dir = std::env::temp_dir().join(format!("freqpanda-backtest-stats-test-{}", uuid_like()));
-        write_fixture(&dir, "SimpleRsiMacdStrategy", serde_json::json!({ "profit_total_pct": 1.0 }));
+        write_fixture(&dir, "SimpleRsiMacdStrategy", serde_json::json!({ "profit_total": 0.01 }));
 
         let err = read_backtest_stats(&dir, "SomeOtherStrategy").unwrap_err();
         assert!(err.contains("SomeOtherStrategy"), "error should name the requested strategy, got: {err}");
