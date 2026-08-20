@@ -44,6 +44,158 @@ const DATA_SOURCE_EXCHANGE: &str = "okx";
 const DATA_SOURCE_EXCHANGE_FALLBACK: &str = "gate";
 const DATA_SOURCE_EXCHANGES: [&str; 2] = [DATA_SOURCE_EXCHANGE, DATA_SOURCE_EXCHANGE_FALLBACK];
 
+// Known hard caps on how far back a data source's public OHLCV API will
+// serve candles AT ALL, in units of candles — this is NOT a per-request
+// page size (freqtrade's own download-data already paginates within
+// whatever per-call limit an exchange has; that part works fine for every
+// data source here, Gate included). It's a separate, total "how much
+// history exists through this endpoint" boundary that some exchanges
+// enforce on top of normal pagination. Confirmed by reading freqtrade's own
+// exchange/gate.py (raw.githubusercontent.com, `stable` branch): it
+// declares no `ohlcv_candle_limit`/`ohlcv_has_history`-style override for
+// this, so freqtrade has no built-in awareness of it — it just keeps
+// requesting older pages via the normal retry path and gets a deterministic
+// "Candlestick too long ago. Maximum 10000 points ago are allowed" error
+// back every time, which retrying never fixes. Gate.io's own spot v4 API
+// enforces this 10,000-candle boundary regardless of pagination; OKX has
+// shown no equivalent limit at any range this app has ever requested, so it
+// has no entry here. Add an entry only for a data source that's actually
+// been observed hitting a limit like this — this is not a general-purpose
+// registry to pre-fill defensively.
+fn data_source_max_candles(data_source: &str) -> Option<i64> {
+    match data_source {
+        "gate" => Some(10_000),
+        _ => None,
+    }
+}
+
+// Minute-granularity is all this app has ever needed: FreqAI's fixed
+// BASE_TIMEFRAME is "5m", and every rule-based preset's baseTimeframe/
+// informativeTimeframe (lib/rule-based-presets.ts) is "15m" or "1h".
+fn timeframe_to_minutes(timeframe: &str) -> Result<i64, String> {
+    let split_at = timeframe
+        .find(|c: char| !c.is_ascii_digit())
+        .ok_or_else(|| format!("could not parse timeframe '{timeframe}'"))?;
+    let (num, unit) = timeframe.split_at(split_at);
+    let num: i64 = num.parse().map_err(|_| format!("could not parse timeframe '{timeframe}'"))?;
+    match unit {
+        "m" => Ok(num),
+        "h" => Ok(num * 60),
+        "d" => Ok(num * 60 * 24),
+        "w" => Ok(num * 60 * 24 * 7),
+        _ => Err(format!("unsupported timeframe unit in '{timeframe}'")),
+    }
+}
+
+// Narrows an ideal [start, today] download window down to what a data
+// source with a known total-history cap (see data_source_max_candles) can
+// actually serve at a given candle size — never widens it. minutes_per_
+// candle should be the FINEST (smallest) timeframe among whatever's about
+// to be downloaded in the same request: that's the one that burns through
+// the candle cap fastest for a given number of days, so it's the one that
+// determines how far back this data source can go. Applies a 5% safety
+// margin below the exchange's own stated boundary — that boundary is an
+// exact candle count, and requesting right up to it risks the same error on
+// an off-by-one (partial candle, clock skew, inclusive-vs-exclusive
+// counting) rather than actually fixing anything.
+fn clamp_start_date_for_max_candles(
+    max_candles: Option<i64>,
+    minutes_per_candle: i64,
+    ideal_start: chrono::NaiveDate,
+    today: chrono::NaiveDate,
+) -> chrono::NaiveDate {
+    let Some(max_candles) = max_candles else {
+        return ideal_start;
+    };
+    let safety_margin_candles = (max_candles as f64 * 0.95) as i64;
+    let max_days = ((safety_margin_candles * minutes_per_candle) / (24 * 60)).max(1);
+    let boundary = today - Duration::days(max_days);
+    // Whichever start date is closer to today wins — that's the tighter of
+    // the two constraints. If the ideal window is already narrower than
+    // what this data source allows, it's returned unchanged.
+    ideal_start.max(boundary)
+}
+
+fn clamp_start_date_for_data_source(
+    data_source: &str,
+    timeframe: &str,
+    ideal_start: chrono::NaiveDate,
+    today: chrono::NaiveDate,
+) -> Result<chrono::NaiveDate, String> {
+    let minutes_per_candle = timeframe_to_minutes(timeframe)?;
+    Ok(clamp_start_date_for_max_candles(data_source_max_candles(data_source), minutes_per_candle, ideal_start, today))
+}
+
+#[cfg(test)]
+mod data_source_history_limit_tests {
+    use super::{clamp_start_date_for_data_source, clamp_start_date_for_max_candles, timeframe_to_minutes};
+    use chrono::NaiveDate;
+
+    #[test]
+    fn timeframe_to_minutes_parses_common_freqtrade_timeframes() {
+        assert_eq!(timeframe_to_minutes("5m").unwrap(), 5);
+        assert_eq!(timeframe_to_minutes("15m").unwrap(), 15);
+        assert_eq!(timeframe_to_minutes("1h").unwrap(), 60);
+        assert_eq!(timeframe_to_minutes("4h").unwrap(), 240);
+        assert_eq!(timeframe_to_minutes("1d").unwrap(), 1440);
+    }
+
+    #[test]
+    fn timeframe_to_minutes_rejects_garbage() {
+        assert!(timeframe_to_minutes("bogus").is_err());
+        assert!(timeframe_to_minutes("").is_err());
+    }
+
+    #[test]
+    fn unconstrained_data_sources_never_get_clamped() {
+        let today = NaiveDate::from_ymd_opt(2026, 8, 19).unwrap();
+        let ideal_start = today - chrono::Duration::days(148);
+        let start = clamp_start_date_for_data_source("okx", "5m", ideal_start, today).unwrap();
+        assert_eq!(start, ideal_start);
+    }
+
+    #[test]
+    fn gate_clamps_a_148_day_5m_window_down_to_its_candle_cap() {
+        // Reproduces the reported bug: 148 days at 5m is ~42,624 candles,
+        // vastly more than Gate's 10,000-candle cap (~34.7 days before any
+        // safety margin, ~33 with the 5% margin this function applies).
+        let today = NaiveDate::from_ymd_opt(2026, 8, 19).unwrap();
+        let ideal_start = today - chrono::Duration::days(148);
+        let start = clamp_start_date_for_data_source("gate", "5m", ideal_start, today).unwrap();
+        let clamped_days = (today - start).num_days();
+        assert!(clamped_days < 148, "expected clamping to shorten the window, got {clamped_days} days");
+        // 10_000 * 0.95 = 9_500 candles * 5 minutes / 1440 minutes/day = 32.98 -> 32 days
+        assert_eq!(clamped_days, 32);
+    }
+
+    #[test]
+    fn gate_does_not_clamp_a_window_already_within_its_cap() {
+        let today = NaiveDate::from_ymd_opt(2026, 8, 19).unwrap();
+        // 20 days at 5m = 5,760 candles, comfortably under Gate's cap.
+        let ideal_start = today - chrono::Duration::days(20);
+        let start = clamp_start_date_for_data_source("gate", "5m", ideal_start, today).unwrap();
+        assert_eq!(start, ideal_start);
+    }
+
+    #[test]
+    fn gate_clamp_uses_the_finest_of_multiple_requested_timeframes() {
+        // run_local_backtest can request base + informative timeframes in
+        // the same download-data call; the finer one (more candles per day)
+        // is what actually determines how far back Gate will go.
+        let today = NaiveDate::from_ymd_opt(2026, 8, 19).unwrap();
+        let ideal_start = today - chrono::Duration::days(90);
+        let minutes_15m = timeframe_to_minutes("15m").unwrap();
+        let minutes_1h = timeframe_to_minutes("1h").unwrap();
+        let start_15m = clamp_start_date_for_max_candles(Some(10_000), minutes_15m, ideal_start, today);
+        let start_1h = clamp_start_date_for_max_candles(Some(10_000), minutes_1h, ideal_start, today);
+        // 15m is finer than 1h, so it should be clamped at least as hard.
+        assert!(start_15m >= start_1h);
+        // 90 days at 15m = 8,640 candles, under the 9,500-candle margin —
+        // no clamping needed here at all.
+        assert_eq!(start_15m, ideal_start);
+    }
+}
+
 // Mode A (local training). Spawns FreqAI via `docker run` as a child
 // process, streams its output to the frontend as `training-progress`
 // events, and returns the path of the ONE resulting .joblib file — never a
@@ -128,16 +280,26 @@ async fn train_local_model(
     // across — same 90-day floor / 4x-of-(train+backtest) multiplier this
     // project already used for cloud training before local training
     // replaced it (see buildFreqAITrainingCloudInit's git history in
-    // lib/hetzner.ts). Also drives download-data below with the exact same
-    // range, so the candles on disk always cover what backtesting asks for
-    // — never narrower (which FreqAI would reject) or pointlessly wider.
+    // lib/hetzner.ts). This is the IDEAL window; whichever data source ends
+    // up serving the download below may narrow it further (see
+    // clamp_start_date_for_data_source and the loop below) if that data
+    // source can't actually serve this much history — download-data is
+    // always run with whatever the *effective*, possibly-narrowed range
+    // ends up being for the attempt that succeeds, and backtesting below
+    // uses that exact same effective range, so the candles on disk always
+    // cover what backtesting asks for — never narrower (which FreqAI would
+    // reject) or pointlessly wider.
     const FREQAI_TRAIN_PERIOD_DAYS: i64 = 30;
     const FREQAI_BACKTEST_PERIOD_DAYS: i64 = 7;
     let timerange_days = ((FREQAI_TRAIN_PERIOD_DAYS + FREQAI_BACKTEST_PERIOD_DAYS) * 4).max(90);
     let today = Utc::now().date_naive();
-    let start_date = today - Duration::days(timerange_days);
+    let ideal_start_date = today - Duration::days(timerange_days);
     let fmt_date = |d: chrono::NaiveDate| d.format("%Y%m%d").to_string();
-    let timerange = format!("{}-{}", fmt_date(start_date), fmt_date(today));
+    // Used only to detect whether the user's own request (pairlist,
+    // timerange) changed since the last run, via download_identity below —
+    // deliberately NOT narrowed per data source, since that identity is
+    // about what was asked for, not which data source happened to serve it.
+    let ideal_timerange = format!("{}-{}", fmt_date(ideal_start_date), fmt_date(today));
 
     // `exchange_name` (the bot's own real trading exchange) is accepted
     // here only for API compatibility with the frontend invoke call —
@@ -180,7 +342,7 @@ async fn train_local_model(
     // it against the marker written after the last successful download
     // (below) is what makes that enforcement hold on a resumed/reattached
     // run too, not just a bot's very first training run.
-    let download_identity = compute_download_identity(&manual_pairs, clamped_pair_count, &timerange);
+    let download_identity = compute_download_identity(&manual_pairs, clamped_pair_count, &ideal_timerange);
     let download_identity_path = user_data_dir.join(".download-identity");
     let previous_download_identity = std::fs::read_to_string(&download_identity_path).ok();
     if previous_download_identity.as_deref() != Some(download_identity.as_str()) {
@@ -211,7 +373,33 @@ async fn train_local_model(
     // never drift apart.
     let mut download_ok = false;
     let mut last_download_err = String::new();
+    // Set to whichever attempt's timerange actually succeeded — may be
+    // narrower than ideal_timerange if that data source has a known total-
+    // history limit (see clamp_start_date_for_data_source). Backtesting
+    // below must be told this exact same range, not the ideal one, or it
+    // would be asked to slide across candles that were never downloaded.
+    let mut effective_timerange = String::new();
     for data_source in DATA_SOURCE_EXCHANGES {
+        // Some data sources (Gate.io: 10,000 candles total, see
+        // data_source_max_candles) cap how far back they'll serve candles
+        // AT ALL, regardless of freqtrade's own pagination — requesting
+        // past that boundary fails deterministically and no amount of
+        // retrying fixes it (see this function's own doc comment on
+        // ideal_timerange). Narrow the window for THIS attempt only, and
+        // say so up front, before download-data ever runs — not after 20
+        // failed retries per pair.
+        let start_date = clamp_start_date_for_data_source(data_source, BASE_TIMEFRAME, ideal_start_date, today)?;
+        let timerange = format!("{}-{}", fmt_date(start_date), fmt_date(today));
+        if start_date != ideal_start_date {
+            emit_status(
+                &app,
+                &bot_id,
+                format!(
+                    "=== data source '{data_source}' only serves the most recent ~{} days of history at {BASE_TIMEFRAME} — requesting {timerange} for this attempt instead of the full {timerange_days}-day window ===",
+                    (today - start_date).num_days(),
+                ),
+            );
+        }
         emit_status(&app, &bot_id, format!("=== download-data: trying data source '{data_source}' ==="));
 
         // The CONCRETE list of pairs this bot will actually trade/backtest
@@ -285,6 +473,7 @@ async fn train_local_model(
         match run_freqtrade_step_resumable(&app, &bot_id, &work_dir, &download_container, &download_data_args).await {
             Ok(()) => {
                 download_ok = true;
+                effective_timerange = timerange;
                 break;
             }
             Err(e) => last_download_err = e,
@@ -345,7 +534,7 @@ async fn train_local_model(
             "--freqaimodel",
             "LightGBMRegressor",
             "--timerange",
-            &timerange,
+            &effective_timerange,
             // Explicit training is always a deliberate, user-initiated
             // action — it must always actually retrain, never silently
             // reuse a cached backtest result. freqtrade defaults to
@@ -505,15 +694,31 @@ async fn run_local_backtest(
 
     // No train/backtest split to size this from (see
     // build_local_backtest_config's doc comment) — just enough history for
-    // a meaningful sample of trades. Also passed to backtesting below,
-    // purely to bound the run to the same window that was actually
-    // downloaded — plain backtesting doesn't require --timerange the way
-    // FreqAI backtesting does.
+    // a meaningful sample of trades. This is the IDEAL window; same as
+    // train_local_model, whichever data source ends up serving the
+    // download may narrow it further if that data source has a known
+    // total-history limit (see clamp_start_date_for_data_source below).
+    // Also passed to backtesting below, purely to bound the run to the same
+    // — possibly narrowed — window that was actually downloaded — plain
+    // backtesting doesn't require --timerange the way FreqAI backtesting
+    // does.
     const RULE_BASED_BACKTEST_PERIOD_DAYS: i64 = 90;
     let today = Utc::now().date_naive();
-    let start_date = today - Duration::days(RULE_BASED_BACKTEST_PERIOD_DAYS);
+    let ideal_start_date = today - Duration::days(RULE_BASED_BACKTEST_PERIOD_DAYS);
     let fmt_date = |d: chrono::NaiveDate| d.format("%Y%m%d").to_string();
-    let timerange = format!("{}-{}", fmt_date(start_date), fmt_date(today));
+
+    // The candle cap a data source enforces (see clamp_start_date_for_data_
+    // source) is per-candle, so it bites hardest on whichever requested
+    // timeframe has the most candles per day — the FINEST of base_timeframe
+    // and any informative timeframe, both of which download-data is asked
+    // to fetch together, at the same --timerange, in the loop below.
+    let finest_download_minutes = download_timeframes
+        .iter()
+        .map(|t| timeframe_to_minutes(t))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .min()
+        .ok_or("downloadTimeframes must contain at least one timeframe")?;
 
     let manual_pairs: Option<Vec<String>> = if auto_select_coins {
         None
@@ -533,7 +738,34 @@ async fn run_local_backtest(
     // fully-checked shape.
     let mut download_ok = false;
     let mut last_download_err = String::new();
+    // Same reasoning as train_local_model's effective_timerange — whichever
+    // attempt actually succeeds may have used a narrower window than
+    // ideal_start_date, and backtesting must be told that exact range.
+    let mut effective_timerange = String::new();
     for data_source in DATA_SOURCE_EXCHANGES {
+        // See train_local_model's identical clamp for why: some data
+        // sources (Gate.io) cap total history regardless of pagination, and
+        // requesting past that boundary fails deterministically no matter
+        // how many times it's retried. Narrow this attempt's window up
+        // front and say so, rather than finding out after repeated failed
+        // downloads per pair.
+        let start_date = clamp_start_date_for_max_candles(
+            data_source_max_candles(data_source),
+            finest_download_minutes,
+            ideal_start_date,
+            today,
+        );
+        let timerange = format!("{}-{}", fmt_date(start_date), fmt_date(today));
+        if start_date != ideal_start_date {
+            emit_status(
+                &app,
+                &bot_id,
+                format!(
+                    "=== data source '{data_source}' only serves the most recent ~{} days of history at this timeframe — requesting {timerange} for this attempt instead of the full {RULE_BASED_BACKTEST_PERIOD_DAYS}-day window ===",
+                    (today - start_date).num_days(),
+                ),
+            );
+        }
         emit_status(&app, &bot_id, format!("=== download-data: trying data source '{data_source}' ==="));
 
         let trading_pairs = match &manual_pairs {
@@ -569,6 +801,7 @@ async fn run_local_backtest(
         match run_freqtrade_step_resumable(&app, &bot_id, &work_dir, &download_container, &download_data_args).await {
             Ok(()) => {
                 download_ok = true;
+                effective_timerange = timerange;
                 break;
             }
             Err(e) => last_download_err = e,
@@ -593,7 +826,7 @@ async fn run_local_backtest(
             "--strategy",
             &strategy,
             "--timerange",
-            &timerange,
+            &effective_timerange,
             // Same fix as train_local_model's backtesting call (see its own
             // comment) — an explicit user-initiated backtest must always
             // actually run, never silently reuse a cached result. Belt-and-
