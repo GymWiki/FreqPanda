@@ -632,6 +632,207 @@ struct BacktestSummary {
     max_drawdown_pct: Option<f64>,
 }
 
+// The single source of truth for which timeframe(s) run_local_backtest
+// downloads. Reads directly out of the ACTUAL strategy_code that's about to
+// be written to strategies/<strategy>.py and handed to freqtrade — the
+// exact same bytes freqtrade itself parses to get the strategy's own
+// `timeframe` attribute (backtesting always uses that; there is no separate
+// "download timeframe" concept in freqtrade). Previously the frontend
+// derived this from RuleBasedPreset.baseTimeframe/informativeTimeframe in
+// lib/rule-based-presets.ts — a second, hand-maintained copy of the same
+// fact whose own doc comments said "must stay in sync with `code`" but
+// nothing actually enforced that. Deriving it from strategy_code here
+// removes that whole class of bug structurally: whatever this returns is
+// guaranteed to match what freqtrade itself uses, because it's parsed from
+// the same source freqtrade parses.
+//
+// Scope: covers every preset in lib/rule-based-presets.ts today — a
+// required `timeframe = "..."` attribute, plus an optional single
+// `informative_timeframe = "..."` attribute (TrendVolumeStrategy's
+// pattern). A strategy using multiple different informative timeframes via
+// a more elaborate informative_pairs() body wouldn't be fully covered by
+// this narrow parse — there's no general Python evaluator here, only a
+// plain-text scan for these two specific class-attribute assignments.
+fn extract_download_timeframes(strategy_code: &str) -> Result<Vec<String>, String> {
+    let base = extract_python_string_assignment(strategy_code, "timeframe").ok_or(
+        "could not find a `timeframe = \"...\"` assignment in the strategy code — cannot determine which timeframe to download",
+    )?;
+    let mut timeframes = vec![base];
+    if let Some(informative) = extract_python_string_assignment(strategy_code, "informative_timeframe") {
+        if !timeframes.contains(&informative) {
+            timeframes.push(informative);
+        }
+    }
+    Ok(timeframes)
+}
+
+// Finds `<name> = "value"` or `<name> = 'value'`, matched against the start
+// of a line (after leading whitespace) so e.g. `informative_timeframe = ...`
+// can never match a lookup for `name = "timeframe"` (it doesn't start with
+// "timeframe"), and a line like `timeframe_multiplier = 2` can't either (the
+// character right after the stripped prefix has to be an `=`, not `_`).
+// Also naturally skips commented-out lines (`# timeframe = "5m"` doesn't
+// start with "timeframe" after trimming) and anything not at the start of
+// its line, e.g. mentions inside a docstring sentence.
+fn extract_python_string_assignment(code: &str, name: &str) -> Option<String> {
+    for line in code.lines() {
+        let trimmed = line.trim_start();
+        let Some(rest) = trimmed.strip_prefix(name) else { continue };
+        let rest = rest.trim_start();
+        let Some(rest) = rest.strip_prefix('=') else { continue };
+        let rest = rest.trim_start();
+        let mut chars = rest.chars();
+        let quote = chars.next()?;
+        if quote != '"' && quote != '\'' {
+            continue;
+        }
+        let value_start = &rest[quote.len_utf8()..];
+        if let Some(end) = value_start.find(quote) {
+            return Some(value_start[..end].to_string());
+        }
+    }
+    None
+}
+
+// freqtrade's own pair-to-filename convention for locally-stored OHLCV data
+// (confirmed by reading freqtrade/misc.py's pair_to_filename, raw.
+// githubusercontent.com, `stable` branch): these exact characters become
+// underscores, nothing else does.
+fn pair_to_filename(pair: &str) -> String {
+    pair.chars()
+        .map(|c| if matches!(c, '/' | ' ' | '.' | '@' | '$' | '+' | ':') { '_' } else { c })
+        .collect()
+}
+
+// Confirms the OHLCV files download-data was just asked to produce actually
+// exist on disk for every (pair, timeframe) combination backtesting is
+// about to need, BEFORE handing control to freqtrade's own `backtesting`
+// command — so a mismatch surfaces as this function's own clear, named
+// error ("data for X @ Y is missing...") instead of freqtrade's cryptic
+// "No history for [pair], spot, 15m found" / "No data found. Terminating."
+// deep inside a backtest run.
+//
+// File location and naming confirmed by reading freqtrade's own
+// data/history/datahandlers/{idatahandler,featherdatahandler}.py and
+// configuration/directory_operations.py (raw.githubusercontent.com,
+// `stable` branch): for a spot pair, with no `--datadir` override (this app
+// never passes one) and freqtrade's default "feather" OHLCV storage format
+// (also never overridden here), a downloaded pair/timeframe lands at
+// exactly `<user_data>/data/<exchange lowercased>/<pair_to_filename(pair)>-
+// <timeframe>.feather`. If freqtrade ever changes this convention, this
+// check starts failing closed (reporting data as missing that's actually
+// there) rather than open — the intent here is "catch drift between
+// download and backtest early", not "silently trust the location forever".
+fn validate_ohlcv_data_present(user_data_dir: &Path, data_source: &str, pairs: &[String], timeframes: &[String]) -> Result<(), String> {
+    let data_dir = user_data_dir.join("data").join(data_source.to_lowercase());
+    let mut missing = Vec::new();
+    for pair in pairs {
+        for timeframe in timeframes {
+            let filename = format!("{}-{timeframe}.feather", pair_to_filename(pair));
+            if !data_dir.join(&filename).is_file() {
+                missing.push(format!("{pair} @ {timeframe}"));
+            }
+        }
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "local data is missing for {} — download it again before backtesting (looked in {}): {}",
+        if missing.len() == 1 { "1 pair/timeframe combination" } else { "these pair/timeframe combinations" },
+        data_dir.display(),
+        missing.join(", "),
+    ))
+}
+
+#[cfg(test)]
+mod rule_based_timeframe_source_of_truth_tests {
+    use super::{extract_download_timeframes, extract_python_string_assignment, pair_to_filename, validate_ohlcv_data_present};
+
+    #[test]
+    fn extracts_a_single_timeframe_attribute() {
+        let code = "class Foo(IStrategy):\n    timeframe = \"15m\"\n    stoploss = -0.1\n";
+        assert_eq!(extract_download_timeframes(code).unwrap(), vec!["15m".to_string()]);
+    }
+
+    #[test]
+    fn extracts_base_plus_informative_timeframe() {
+        let code = "class Foo(IStrategy):\n    timeframe = \"15m\"\n    informative_timeframe = \"1h\"\n";
+        assert_eq!(extract_download_timeframes(code).unwrap(), vec!["15m".to_string(), "1h".to_string()]);
+    }
+
+    #[test]
+    fn does_not_duplicate_when_informative_equals_base() {
+        let code = "class Foo(IStrategy):\n    timeframe = \"1h\"\n    informative_timeframe = \"1h\"\n";
+        assert_eq!(extract_download_timeframes(code).unwrap(), vec!["1h".to_string()]);
+    }
+
+    #[test]
+    fn supports_single_quotes_too() {
+        let code = "class Foo(IStrategy):\n    timeframe = '5m'\n";
+        assert_eq!(extract_download_timeframes(code).unwrap(), vec!["5m".to_string()]);
+    }
+
+    #[test]
+    fn errors_clearly_when_timeframe_attribute_is_missing() {
+        let code = "class Foo(IStrategy):\n    stoploss = -0.1\n";
+        let err = extract_download_timeframes(code).unwrap_err();
+        assert!(err.contains("timeframe"), "error should mention timeframe, got: {err}");
+    }
+
+    #[test]
+    fn ignores_commented_out_and_partial_matches() {
+        let code = "class Foo(IStrategy):\n    # timeframe = \"1m\"\n    timeframe_multiplier = 2\n    timeframe = \"30m\"\n";
+        assert_eq!(extract_download_timeframes(code).unwrap(), vec!["30m".to_string()]);
+    }
+
+    #[test]
+    fn extract_python_string_assignment_ignores_docstring_mentions() {
+        let code = "class Foo(IStrategy):\n    \"\"\"Uses timeframe = \"5m\" as an example in prose.\"\"\"\n    timeframe = \"1h\"\n";
+        assert_eq!(extract_python_string_assignment(code, "timeframe").unwrap(), "1h");
+    }
+
+    #[test]
+    fn pair_to_filename_replaces_the_documented_character_set() {
+        assert_eq!(pair_to_filename("BTC/USDT"), "BTC_USDT");
+        assert_eq!(pair_to_filename("BTC/USDT:USDT"), "BTC_USDT_USDT");
+    }
+
+    #[test]
+    fn validate_ohlcv_data_present_passes_when_every_file_exists() {
+        let tmp = std::env::temp_dir().join(format!("ft-data-present-ok-{}", std::process::id()));
+        let data_dir = tmp.join("user_data").join("data").join("okx");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(data_dir.join("BTC_USDT-15m.feather"), b"x").unwrap();
+        std::fs::write(data_dir.join("BTC_USDT-1h.feather"), b"x").unwrap();
+        let result = validate_ohlcv_data_present(
+            &tmp.join("user_data"),
+            "okx",
+            &["BTC/USDT".to_string()],
+            &["15m".to_string(), "1h".to_string()],
+        );
+        std::fs::remove_dir_all(&tmp).unwrap();
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+    }
+
+    #[test]
+    fn validate_ohlcv_data_present_names_exactly_the_missing_combination() {
+        let tmp = std::env::temp_dir().join(format!("ft-data-present-missing-{}", std::process::id()));
+        let data_dir = tmp.join("user_data").join("data").join("okx");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(data_dir.join("BTC_USDT-5m.feather"), b"x").unwrap();
+        let result = validate_ohlcv_data_present(
+            &tmp.join("user_data"),
+            "okx",
+            &["BTC/USDT".to_string()],
+            &["15m".to_string()],
+        );
+        std::fs::remove_dir_all(&tmp).unwrap();
+        let err = result.unwrap_err();
+        assert!(err.contains("BTC/USDT @ 15m"), "error should name the missing combination, got: {err}");
+    }
+}
+
 // Mode B (rule-based local backtesting) — the non-FreqAI counterpart to
 // train_local_model above. A rule-based strategy (see
 // lib/rule-based-presets.ts) has no model to train or upload, so unlike
@@ -656,8 +857,6 @@ async fn run_local_backtest(
     bot_id: String,
     strategy: String,
     strategy_code: String,
-    base_timeframe: String,
-    download_timeframes: Vec<String>,
     auto_select_coins: bool,
     auto_select_pair_count: u32,
     pair_whitelist: String,
@@ -665,10 +864,14 @@ async fn run_local_backtest(
     if !is_safe_python_identifier(&strategy) {
         return Err(format!("strategy must be a valid Python identifier (got: {strategy:?})"));
     }
-    if download_timeframes.is_empty() {
-        return Err("downloadTimeframes must contain at least one timeframe".into());
-    }
-    let _ = &base_timeframe; // accepted for API symmetry with train_local_model; backtesting itself defaults to the strategy's own `timeframe` attribute
+    // The frontend used to compute and pass this itself (baseTimeframe/
+    // downloadTimeframes, derived from RuleBasedPreset.baseTimeframe/
+    // informativeTimeframe) — see extract_download_timeframes' own doc
+    // comment for why that was a real structural bug risk (two independent,
+    // hand-maintained copies of the same fact that nothing forced to agree)
+    // and why parsing it directly out of strategy_code instead removes that
+    // risk rather than just working around today's symptom of it.
+    let download_timeframes = extract_download_timeframes(&strategy_code)?;
 
     ensure_docker_ready(&app, &bot_id).await?;
 
@@ -742,6 +945,12 @@ async fn run_local_backtest(
     // attempt actually succeeds may have used a narrower window than
     // ideal_start_date, and backtesting must be told that exact range.
     let mut effective_timerange = String::new();
+    // Captured so the pre-flight data check below (validate_ohlcv_data_
+    // present) knows exactly where on disk and for which pairs to look —
+    // has to be the SAME data_source/pairs the winning download actually
+    // used, not e.g. always the first data source tried.
+    let mut effective_data_source = "";
+    let mut effective_pairs: Vec<String> = Vec::new();
     for data_source in DATA_SOURCE_EXCHANGES {
         // See train_local_model's identical clamp for why: some data
         // sources (Gate.io) cap total history regardless of pagination, and
@@ -802,6 +1011,8 @@ async fn run_local_backtest(
             Ok(()) => {
                 download_ok = true;
                 effective_timerange = timerange;
+                effective_data_source = data_source;
+                effective_pairs = trading_pairs;
                 break;
             }
             Err(e) => last_download_err = e,
@@ -813,6 +1024,14 @@ async fn run_local_backtest(
             DATA_SOURCE_EXCHANGES.join(", ")
         ));
     }
+
+    // Confirms the files download-data just produced are actually there,
+    // under exactly the (pair, timeframe) combinations backtesting is about
+    // to ask for — see validate_ohlcv_data_present's own doc comment for
+    // why this exists: a clear, named error here beats freqtrade's own
+    // cryptic "No history for [pair], spot, 15m found" deep inside a
+    // backtest run, whatever the actual cause of a mismatch turns out to be.
+    validate_ohlcv_data_present(&user_data_dir, effective_data_source, &effective_pairs, &download_timeframes)?;
 
     run_freqtrade_step_resumable(
         &app,

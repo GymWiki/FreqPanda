@@ -1,6 +1,6 @@
 [package]
 name = "freqtrade-command-center"
-version = "0.2.5"
+version = "0.2.6"
 description = "Freqtrade Command Center desktop app — local FreqAI training shell around the web dashboard"
 edition = "2021"
 rust-version = "1.77"

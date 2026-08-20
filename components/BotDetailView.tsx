@@ -29,7 +29,6 @@ import {
   BarChart3,
 } from "lucide-react";
 import type { BotConfigurationDTO } from "@/lib/types";
-import { RULE_BASED_PRESETS } from "@/lib/rule-based-presets";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { LifecycleBadge } from "@/components/ui/LifecycleBadge";
 import { deriveLifecycleStatus } from "@/lib/bot-lifecycle";
@@ -278,17 +277,16 @@ export function BotDetailView({ bot: initialBot }: BotDetailViewProps) {
     });
 
     try {
-      const preset = RULE_BASED_PRESETS.find((p) => p.className === bot.strategy);
-      const baseTimeframe = preset?.baseTimeframe ?? "15m";
-      const downloadTimeframes = [baseTimeframe, preset?.informativeTimeframe].filter(
-        (tf): tf is string => Boolean(tf),
-      );
+      // Which timeframe(s) to download is no longer decided here — Rust's
+      // run_local_backtest derives it directly from strategyCode's own
+      // `timeframe`/`informative_timeframe` attributes (the exact same
+      // source freqtrade itself reads), so it can never drift from what
+      // backtesting actually uses. See extract_download_timeframes'
+      // doc comment in src-tauri/src/main.rs.
       const summary = await invoke<BacktestSummary>("run_local_backtest", {
         botId: bot.id,
         strategy: bot.strategy,
         strategyCode: bot.strategyCode,
-        baseTimeframe,
-        downloadTimeframes,
         autoSelectCoins: bot.autoSelectCoins,
         autoSelectPairCount: bot.autoSelectPairCount,
         pairWhitelist: bot.pairWhitelist ?? "",

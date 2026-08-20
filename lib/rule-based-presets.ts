@@ -12,32 +12,30 @@ export interface RuleBasedPreset {
   title: string;
   description: string;
   risk: "Laag" | "Gemiddeld" | "Hoog";
-  /** Display string shown in the UI (e.g. "15m"). */
+  /**
+   * Display string shown in the UI (e.g. "15m", or "15m / 1h" for a
+   * strategy with an informative pair). Purely cosmetic — which
+   * timeframe(s) `run_local_backtest` actually downloads is no longer
+   * sourced from this preset object at all. It used to be (via a
+   * baseTimeframe/informativeTimeframe pair of fields here), which meant
+   * two independent, hand-maintained copies of the same fact — this string
+   * for the UI, those fields for the download — with nothing but a doc
+   * comment enforcing that they and `code`'s own `timeframe`/
+   * `informative_timeframe` class attributes all agreed. Rust's
+   * extract_download_timeframes (src-tauri/src/main.rs) now parses the
+   * timeframe(s) directly out of `code` itself instead — the same bytes
+   * freqtrade parses for backtesting — so there is exactly one source of
+   * truth left, and this display string can drift from it without ever
+   * causing a download/backtest mismatch again.
+   */
   timeframe: string;
-  /**
-   * The single concrete freqtrade timeframe value baked into the strategy's
-   * own `timeframe` class attribute — used for `download-data --timeframes`
-   * and (optionally) `backtesting --timeframe`. Kept separate from the
-   * display `timeframe` above for the same reason
-   * FreqAIFeatureConfig.baseTimeframe is in lib/strategy-presets.ts.
-   */
-  baseTimeframe: string;
-  /**
-   * Set only for a strategy that pulls in a higher timeframe as an
-   * informative pair (e.g. TrendVolumeStrategy's `informative_timeframe`,
-   * via `merge_informative_pair`) — the frontend unions this with
-   * baseTimeframe into run_local_backtest's downloadTimeframes so
-   * download-data actually fetches both, not just the base one. Undefined
-   * for a single-timeframe strategy.
-   */
-  informativeTimeframe?: string;
   /** Python class name — becomes both `strategy` and part of a filename. Never shown in the UI. */
   className: string;
   code: string;
   /**
    * Must equal the `startup_candle_count` class attribute baked into
-   * `code` (in units of baseTimeframe candles — see TrendVolumeStrategy's
-   * own comment for why that's a real, easy-to-get-wrong distinction once
+   * `code` (in units of the strategy's own `timeframe` candles — see
+   * TrendVolumeStrategy's own comment for why that's a real, easy-to-get-wrong distinction once
    * an informative pair on a different timeframe is involved). Kept here
    * purely as a visible cross-check against `code` drifting out of sync
    * with itself — unlike FreqAIFeatureConfig.startupCandleCount in
@@ -248,7 +246,6 @@ export const RULE_BASED_PRESETS: RuleBasedPreset[] = [
       "Klassieke instapregels: koopt bij een oversold RSI mét bevestiging van de MACD-trend. Werkt met 5-15 paren op een 15m-timeframe. Geen AI, geen training — direct te backtesten.",
     risk: "Gemiddeld",
     timeframe: "15m",
-    baseTimeframe: "15m",
     className: "SimpleRsiMacdStrategy",
     code: RSI_MACD_CODE,
     startupCandleCount: 50,
@@ -260,8 +257,6 @@ export const RULE_BASED_PRESETS: RuleBasedPreset[] = [
       "Stapt alleen in als een hogere timeframe (1h) een opwaartse trend bevestigt, met volume- en RSI-condities op 15m. Geïnspireerd door NostalgiaForInfinity's aanpak — géén kopie van die code. Werkt het best met 10-30 paren.",
     risk: "Gemiddeld",
     timeframe: "15m / 1h",
-    baseTimeframe: "15m",
-    informativeTimeframe: "1h",
     className: "TrendVolumeStrategy",
     code: TREND_VOLUME_CODE,
     startupCandleCount: 850,
@@ -273,7 +268,6 @@ export const RULE_BASED_PRESETS: RuleBasedPreset[] = [
       "Koopt wanneer de prijs de onderste Bollinger Band aantikt, verkoopt bij terugkeer naar het gemiddelde. Eenvoudig en voorspelbaar, het best op een 1h-timeframe met 5-15 paren.",
     risk: "Laag",
     timeframe: "1h",
-    baseTimeframe: "1h",
     className: "BollingerMeanReversionStrategy",
     code: BOLLINGER_CODE,
     startupCandleCount: 40,
