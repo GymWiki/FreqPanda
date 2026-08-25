@@ -143,6 +143,34 @@ export const nl = {
     practiceModeNoticeSuffix:
       " — geen budget nodig, geen echt geld op het spel. Zodra je tevreden bent met de resultaten, schakel je over op echt geld vanaf de bot-detailpagina.",
     submit: "Bot aanmaken (oefenmodus)",
+    // Wizard chrome: a stepped flow instead of one long form, so someone
+    // with no technical background only ever sees one decision at a time,
+    // with a sensible default already filled in.
+    stepIndicator: (step: number, total: number) => `Stap ${step} van ${total}`,
+    stepBack: "Vorige",
+    stepNext: "Volgende",
+    step1Title: "Naam en strategie",
+    step2Title: "Exchange koppelen",
+    step2Intro:
+      "Dit heb je alleen nodig als je later met echt geld wilt handelen. Trainen en testen in oefenmodus werkt zonder — en je kunt dit altijd later alsnog doen, vanaf de bot-pagina.",
+    step2SkipTitle: "Later koppelen",
+    step2SkipDescription: "Begin meteen met trainen en testen. Ideaal om eerst te zien hoe je bot presteert.",
+    step2ConnectTitle: "Nu koppelen",
+    step2ConnectDescription: "Kies je exchange en vul je API-sleutels in zodra deze bot zo is aangemaakt.",
+    step3Title: "Munten",
+    step4Title: "Bevestigen",
+    step4ReadyIntro: "Even controleren, dan gaan we los:",
+    step4SummaryName: "Naam",
+    step4SummaryType: "Type",
+    step4SummaryStrategy: "Strategie",
+    step4SummaryPairs: "Munten",
+    step4SummaryPairsAuto: (count: number) => `Automatisch, top ${count}`,
+    step4SummaryExchange: "Exchange",
+    step4SummaryExchangeLater: "Later koppelen",
+    step4SummaryExchangeNow: "Direct na aanmaken",
+    submitAndTrain: "Aanmaken en direct trainen",
+    submitAndBacktest: "Aanmaken en direct backtesten",
+    submitWebOnlyNote: "Open de FreqPanda desktop-app om automatisch te laten trainen of backtesten na het aanmaken.",
   },
 
   strategyPicker: {
@@ -154,6 +182,31 @@ export const nl = {
   ruleBasedPicker: {
     ariaLabel: "Kies een regel-gebaseerde strategie",
     timeframePrefix: "Timeframe: ",
+  },
+
+  // Plain-language translations for every error src-tauri/src/main.rs's
+  // train_local_model/run_local_backtest can reject with — see
+  // lib/training-error-messages.ts, which maps the raw Rust/Docker Err
+  // string to one of these before it ever reaches the UI. The user must
+  // never see that raw string directly: it can be an internal validation
+  // message ("generated config.json is missing required key '...'"), a
+  // bare Docker exit code, or (worst case) a line straight out of a
+  // freqtrade Python traceback. genericTraining/genericBacktest are the
+  // catch-all for anything not specifically recognized below — deliberately
+  // vague about the cause (there isn't a safe way to summarize an
+  // unanticipated raw error without risking leaking exactly the kind of
+  // text this exists to hide) but always actionable (try again).
+  trainingErrors: {
+    dockerNotRunning: "Docker Desktop lijkt niet actief te zijn. Start Docker Desktop en probeer het opnieuw.",
+    downloadFailed:
+      "Het downloaden van historische koersdata is niet gelukt. Controleer je internetverbinding en probeer het over een paar minuten opnieuw.",
+    noPairsSelected: "Kies minstens 1 munt, of laat munten automatisch kiezen, voordat je verder gaat.",
+    dataMissingAfterDownload:
+      "De gedownloade data bleek niet compleet voor deze strategie. Probeer opnieuw — blijft dit gebeuren, meld het dan als bug.",
+    strategyCodeInvalid:
+      "Er zit een fout in de strategiecode van deze bot, waardoor niet duidelijk is welke data nodig is. Neem contact op als dit blijft gebeuren.",
+    genericTraining: "Er ging iets mis tijdens het downloaden en trainen. Dit is meestal tijdelijk — probeer het opnieuw.",
+    genericBacktest: "Er ging iets mis tijdens het downloaden en backtesten. Dit is meestal tijdelijk — probeer het opnieuw.",
   },
 
   backtestResults: {
@@ -173,6 +226,20 @@ export const nl = {
     notAvailable: "N.v.t.",
     zeroTrades:
       "Deze backtest sloot geen enkele trade in de gekozen periode — de instapregels van deze strategie kwamen simpelweg niet voor bij de geselecteerde munten. Probeer eventueel andere munten of een minder strikte strategie.",
+    // See lib/backtest-interpretation.ts for the thresholds that pick one
+    // of these — a one-sentence, plain-language reading next to the raw
+    // numbers, so someone with no trading background doesn't have to
+    // work out for themselves whether a given profit% or drawdown% is
+    // actually good or bad.
+    interpretationStronglyNegative:
+      "Deze strategie verloor consistent geld in de geteste periode — overweeg een andere strategie of een andere periode.",
+    interpretationNegative:
+      "Deze strategie verloor per saldo geld in de geteste periode. Geen reden voor paniek bij een klein verlies, maar wees voorzichtig voordat je hiermee live gaat.",
+    interpretationHighDrawdown:
+      "Het resultaat is positief, maar met een fors tussentijds verlies (drawdown) onderweg. Zorg dat je daar zowel mentaal als financieel op voorbereid bent voordat je live gaat.",
+    interpretationStronglyPositive:
+      "Deze strategie presteerde sterk in de geteste periode. Onthoud: historische resultaten zijn geen garantie — test bij voorkeur ook een andere periode voordat je live gaat.",
+    interpretationPositive: "Een bescheiden positief resultaat in de geteste periode. Overweeg een langere testperiode of meer munten voor een steviger beeld.",
   },
 
   budgetSlider: {

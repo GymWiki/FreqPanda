@@ -138,6 +138,34 @@ export const en: Dictionary = {
     practiceModeNoticeBold: "practice mode",
     practiceModeNoticeSuffix: " — no budget needed, no real money at risk. Once you're happy with the results, switch to real money from the bot's detail page.",
     submit: "Create bot (practice mode)",
+    // Wizard chrome: a stepped flow instead of one long form, so someone
+    // with no technical background only ever sees one decision at a time,
+    // with a sensible default already filled in.
+    stepIndicator: (step: number, total: number) => `Step ${step} of ${total}`,
+    stepBack: "Back",
+    stepNext: "Next",
+    step1Title: "Name and strategy",
+    step2Title: "Link an exchange",
+    step2Intro:
+      "You only need this if you plan to trade with real money later. Training and testing in practice mode works fine without it — and you can always do this later, from the bot's page.",
+    step2SkipTitle: "Link later",
+    step2SkipDescription: "Start training and testing right away. Great for seeing how your bot performs first.",
+    step2ConnectTitle: "Link now",
+    step2ConnectDescription: "Pick your exchange and enter your API keys as soon as this bot is created.",
+    step3Title: "Coins",
+    step4Title: "Confirm",
+    step4ReadyIntro: "One last check, then let's go:",
+    step4SummaryName: "Name",
+    step4SummaryType: "Type",
+    step4SummaryStrategy: "Strategy",
+    step4SummaryPairs: "Coins",
+    step4SummaryPairsAuto: (count: number) => `Automatic, top ${count}`,
+    step4SummaryExchange: "Exchange",
+    step4SummaryExchangeLater: "Link later",
+    step4SummaryExchangeNow: "Right after creation",
+    submitAndTrain: "Create and start training",
+    submitAndBacktest: "Create and start backtesting",
+    submitWebOnlyNote: "Open the FreqPanda desktop app to have it train or backtest automatically after creation.",
   },
 
   strategyPicker: {
@@ -149,6 +177,24 @@ export const en: Dictionary = {
   ruleBasedPicker: {
     ariaLabel: "Choose a rule-based strategy",
     timeframePrefix: "Timeframe: ",
+  },
+
+  // Plain-language translations for every error src-tauri/src/main.rs's
+  // train_local_model/run_local_backtest can reject with — see
+  // lib/training-error-messages.ts, which maps the raw Rust/Docker Err
+  // string to one of these before it ever reaches the UI. The user must
+  // never see that raw string directly: it can be an internal validation
+  // message, a bare Docker exit code, or (worst case) a line straight out
+  // of a freqtrade Python traceback. genericTraining/genericBacktest are
+  // the catch-all for anything not specifically recognized below.
+  trainingErrors: {
+    dockerNotRunning: "Docker Desktop doesn't seem to be running. Start Docker Desktop and try again.",
+    downloadFailed: "Downloading historical price data didn't work. Check your internet connection and try again in a few minutes.",
+    noPairsSelected: "Pick at least 1 coin, or let coins be chosen automatically, before continuing.",
+    dataMissingAfterDownload: "The downloaded data turned out incomplete for this strategy. Try again — if this keeps happening, report it as a bug.",
+    strategyCodeInvalid: "There's an issue in this bot's strategy code that made it unclear which data is needed. Get in touch if this keeps happening.",
+    genericTraining: "Something went wrong while downloading and training. This is usually temporary — try again.",
+    genericBacktest: "Something went wrong while downloading and backtesting. This is usually temporary — try again.",
   },
 
   backtestResults: {
@@ -168,6 +214,19 @@ export const en: Dictionary = {
     notAvailable: "N/A",
     zeroTrades:
       "This backtest closed zero trades in the chosen period — this strategy's entry rules simply never triggered for the selected coins. Try different coins or a less strict strategy.",
+    // See lib/backtest-interpretation.ts for the thresholds that pick one
+    // of these — a one-sentence, plain-language reading next to the raw
+    // numbers, so someone with no trading background doesn't have to work
+    // out for themselves whether a given profit% or drawdown% is
+    // actually good or bad.
+    interpretationStronglyNegative: "This strategy lost money consistently over the tested period — consider a different strategy or a different period.",
+    interpretationNegative:
+      "This strategy lost money on balance over the tested period. No reason to panic over a small loss, but be careful before taking this live.",
+    interpretationHighDrawdown:
+      "The result is positive, but with a steep dip (drawdown) along the way. Make sure you're prepared for that, both mentally and financially, before going live.",
+    interpretationStronglyPositive:
+      "This strategy performed strongly over the tested period. Remember: past results are no guarantee — it's worth testing a different period too before going live.",
+    interpretationPositive: "A modest positive result over the tested period. Consider a longer test period or more coins for a sturdier picture.",
   },
 
   budgetSlider: {

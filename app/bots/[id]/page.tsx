@@ -10,6 +10,16 @@ import { getUserLocale } from "@/lib/profile-locale";
 
 interface BotDetailPageProps {
   params: { id: string };
+  // Set by the "New Bot" wizard's own navigation right after creating a
+  // bot (see NewBotDialog's handleSubmit) — ?autostart=1 makes this page
+  // immediately kick off local training (FreqAI) or a backtest (rule-
+  // based) instead of leaving a freshly created bot idle until the user
+  // clicks a button; ?connectExchange=1 opens the exchange-linking dialog
+  // right away too, if that's what the user chose in the wizard's
+  // exchange step. Both are read-once flags for BotDetailView, not
+  // persisted state — a plain page refresh drops them, same as any other
+  // one-time "just arrived from a specific action" signal.
+  searchParams: { autostart?: string; connectExchange?: string };
 }
 
 // The detail page a dashboard card (components/BotCard.tsx) links to —
@@ -17,7 +27,7 @@ interface BotDetailPageProps {
 // one bot instead of the whole fleet. A bot that doesn't exist, or belongs
 // to someone else, renders the same 404 either way — not found and not
 // yours are indistinguishable from the outside, on purpose.
-export default async function BotDetailPage({ params }: BotDetailPageProps) {
+export default async function BotDetailPage({ params, searchParams }: BotDetailPageProps) {
   const supabase = await createClient();
   const {
     data: { user },
@@ -44,7 +54,11 @@ export default async function BotDetailPage({ params }: BotDetailPageProps) {
         <Navbar />
         <main>
           <ErrorBoundary>
-            <BotDetailView bot={toBotDTO(bot)} />
+            <BotDetailView
+              bot={toBotDTO(bot)}
+              autoStart={searchParams.autostart === "1"}
+              autoConnectExchange={searchParams.connectExchange === "1"}
+            />
           </ErrorBoundary>
         </main>
       </div>

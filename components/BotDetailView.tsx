@@ -43,9 +43,22 @@ import { isTauri } from "@/lib/tauri";
 import { apiFetch, toErrorMessage } from "@/lib/api-client";
 import { useDictionary } from "@/components/I18nProvider";
 import { InfoTooltip } from "@/components/ui/Tooltip";
+import { useLocalTrainingSync } from "@/lib/use-local-training-sync";
+import { toFriendlyTrainingError, toFriendlyProgressLine } from "@/lib/training-error-messages";
+import { interpretBacktestResult } from "@/lib/backtest-interpretation";
 
 interface BotDetailViewProps {
   bot: BotConfigurationDTO;
+  // Set once, from a query flag the "New Bot" wizard's own navigation adds
+  // right after creating this bot (see NewBotDialog and app/bots/[id]/
+  // page.tsx) — not persisted, a plain refresh drops both. autoStart kicks
+  // off local training (FreqAI) or a backtest (rule-based) immediately
+  // instead of leaving a freshly created bot idle until the user finds and
+  // clicks the right button; autoConnectExchange opens the exchange-
+  // linking dialog right away, if that's what the user chose in the
+  // wizard's own exchange step.
+  autoStart?: boolean;
+  autoConnectExchange?: boolean;
 }
 
 // Mirrors src-tauri/src/main.rs's BacktestSummary — the result of
@@ -85,15 +98,13 @@ interface BacktestSummary {
 // mutation) since — unlike the old card — there's no parent list to push
 // updates back into; a delete navigates back to the dashboard instead of
 // calling an onDelete prop.
-export function BotDetailView({ bot: initialBot }: BotDetailViewProps) {
+export function BotDetailView({ bot: initialBot, autoStart = false, autoConnectExchange = false }: BotDetailViewProps) {
   const dict = useDictionary();
   const router = useRouter();
   const [bot, setBot] = useState(initialBot);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [isDeploying, setIsDeploying] = useState(false);
-  const [isTrainingLocally, setIsTrainingLocally] = useState(false);
-  const [trainingStatus, setTrainingStatus] = useState<string | null>(null);
   const [isBacktesting, setIsBacktesting] = useState(false);
   const [backtestStatus, setBacktestStatus] = useState<string | null>(null);
   const [backtestResult, setBacktestResult] = useState<BacktestSummary | null>(null);
@@ -116,30 +127,15 @@ export function BotDetailView({ bot: initialBot }: BotDetailViewProps) {
     setBot((prev) => ({ ...prev, ...updated }));
   }
 
-  // Reconnects to a local training run that's still going (or finished
-  // without ever getting uploaded) after this page remounts — see
-  // handleStartLocalTraining's own doc comment for why calling it again is
-  // always safe.
-  useEffect(() => {
-    if (!isTauri() || bot.aiModelPath) return;
-    let cancelled = false;
-    (async () => {
-      const { invoke } = await import("@tauri-apps/api/core");
-      try {
-        const status = await invoke<{ state: string }>("local_training_status", { botId: bot.id });
-        if (!cancelled && status.state !== "not_started") {
-          handleStartLocalTraining();
-        }
-      } catch {
-        // Best-effort — a failed status check just leaves the normal idle
-        // "start training" button visible, same as before this existed.
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bot.id]);
+  // Local FreqAI training: periodically reconnects to (or collects/uploads
+  // the result of) whatever's actually happening in Docker for this bot —
+  // see useLocalTrainingSync's own doc comment for the status-sync bug this
+  // closes (a container that finishes while this page isn't open used to
+  // leave the UI stuck forever). The same hook backs the compact dashboard
+  // card (BotCard.tsx), so the two never show conflicting training states.
+  const { isTrainingLocally, trainingStatusLine, startLocalTraining } = useLocalTrainingSync(bot, (result) => {
+    onUpdate({ ...bot, ...result });
+  });
 
   const lifecycleStatus = deriveLifecycleStatus(bot, isTrainingLocally);
   const trainingFreshness = getTrainingFreshness(bot.aiModelUploadedAt);
@@ -147,6 +143,28 @@ export function BotDetailView({ bot: initialBot }: BotDetailViewProps) {
   const isPaused = bot.status === "PAUSED_EMERGENCY" || bot.status === "SLEEPING" || bot.status === "PAUSED_MANUAL";
   const canStop =
     bot.deploymentStatus === "VPS_ACTIVE" && (bot.status === "TRAINING_PAPER_TRADE" || bot.status === "LIVE_TRADING");
+
+  // Wizard hand-off (see NewBotDialog + BotDetailViewProps' own doc
+  // comment on autoStart/autoConnectExchange): a bot that just got created
+  // through the wizard shouldn't sit idle waiting for another click. Fires
+  // at most once per page load — the ref guard, not just the empty
+  // dependency array, matters here: isTrainingLocally flips true almost
+  // immediately once training starts, and without the guard that change
+  // would re-run this effect's cleanup/setup and could refire it.
+  const autoStartFired = useRef(false);
+  useEffect(() => {
+    if (autoStartFired.current) return;
+    autoStartFired.current = true;
+    if (autoConnectExchange) setIsConnectExchangeOpen(true);
+    if (autoStart && isTauri()) {
+      if (bot.strategyType === "FREQAI") {
+        handleStartLocalTraining();
+      } else {
+        handleRunLocalBacktest();
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function handleResume() {
     setError(null);
@@ -218,41 +236,15 @@ export function BotDetailView({ bot: initialBot }: BotDetailViewProps) {
 
   async function handleStartLocalTraining(forceRetrain = false) {
     setError(null);
-    setTrainingStatus(null);
-    setIsTrainingLocally(true);
-
-    const { invoke } = await import("@tauri-apps/api/core");
-    const { readFile } = await import("@tauri-apps/plugin-fs");
-    const { listen } = await import("@tauri-apps/api/event");
-
-    const unlisten = await listen<{ botId: string; line: string }>("training-progress", (event) => {
-      if (event.payload.botId === bot.id) {
-        setTrainingStatus(event.payload.line);
-      }
-    });
-
     try {
-      const modelPath = await invoke<string>("train_local_model", {
-        botId: bot.id,
-        strategy: bot.strategy,
-        strategyCode: bot.strategyCode,
-        exchangeName: bot.exchangeName ?? "",
-        autoSelectCoins: bot.autoSelectCoins,
-        autoSelectPairCount: bot.autoSelectPairCount,
-        pairWhitelist: bot.pairWhitelist ?? "",
-        forceRetrain,
-      });
-
-      const bytes = await readFile(modelPath);
-      const filename = modelPath.split(/[\\/]/).pop() ?? `${bot.botName}-model.joblib`;
-      const file = new File([new Uint8Array(bytes)], filename, { type: "application/octet-stream" });
-      await handleFileSelected(file);
+      await startLocalTraining(forceRetrain);
     } catch (err) {
-      setError(toErrorMessage(err, dict.botCard.localTrainingFailed));
-    } finally {
-      unlisten();
-      setIsTrainingLocally(false);
-      setTrainingStatus(null);
+      // Deliberately not toErrorMessage(err, ...) here — that would show
+      // whatever raw string train_local_model rejected with, which can be
+      // an internal Rust validation message or, worst case, a line out of
+      // a freqtrade Python traceback. toFriendlyTrainingError always
+      // returns plain language instead. See its own doc comment.
+      setError(toFriendlyTrainingError(err, dict, "training"));
     }
   }
 
@@ -271,9 +263,12 @@ export function BotDetailView({ bot: initialBot }: BotDetailViewProps) {
     const { listen } = await import("@tauri-apps/api/event");
 
     const unlisten = await listen<{ botId: string; line: string }>("training-progress", (event) => {
-      if (event.payload.botId === bot.id) {
-        setBacktestStatus(event.payload.line);
-      }
+      if (event.payload.botId !== bot.id) return;
+      // See toFriendlyProgressLine's own doc comment — never show a raw
+      // freqtrade/Docker log line, only this app's own "=== ... ==="
+      // status lines or freqtrade's own download-progress bars.
+      const friendly = toFriendlyProgressLine(event.payload.line);
+      if (friendly !== null) setBacktestStatus(friendly);
     });
 
     try {
@@ -293,7 +288,9 @@ export function BotDetailView({ bot: initialBot }: BotDetailViewProps) {
       });
       setBacktestResult(summary);
     } catch (err) {
-      setError(toErrorMessage(err, dict.backtestResults.failed));
+      // Deliberately not toErrorMessage(err, ...) — see
+      // handleStartLocalTraining's identical comment above.
+      setError(toFriendlyTrainingError(err, dict, "backtest"));
     } finally {
       unlisten();
       setIsBacktesting(false);
@@ -602,6 +599,23 @@ export function BotDetailView({ bot: initialBot }: BotDetailViewProps) {
                     </p>
                   </div>
                 </div>
+                {(() => {
+                  // A plain-language reading next to the raw numbers — see
+                  // lib/backtest-interpretation.ts's own doc comment for
+                  // why this exists and how the tone is picked. Kept as an
+                  // IIFE rather than a variable above the JSX so it's
+                  // computed right where it's used, next to the exact
+                  // fields it reads.
+                  const interpretation = interpretBacktestResult(backtestResult, dict);
+                  if (!interpretation) return null;
+                  const toneClass =
+                    interpretation.tone === "negative"
+                      ? "border-red-500/30 bg-red-500/5 text-red-300"
+                      : interpretation.tone === "caution"
+                        ? "border-amber-500/30 bg-amber-500/5 text-amber-300"
+                        : "border-emerald-500/30 bg-emerald-500/5 text-emerald-300";
+                  return <p className={`rounded-lg border px-3 py-2.5 text-[11px] leading-relaxed ${toneClass}`}>{interpretation.text}</p>;
+                })()}
                 <p className="text-[11px] text-slate-500">{dict.backtestResults.disclaimer}</p>
               </>
             )
@@ -710,9 +724,9 @@ export function BotDetailView({ bot: initialBot }: BotDetailViewProps) {
                   {isTrainingLocally ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Laptop className="h-3.5 w-3.5" />}
                   {isTrainingLocally ? dict.botCard.trainingLocally : dict.botCard.startLocalTraining}
                 </button>
-                {isTrainingLocally && trainingStatus && (
-                  <p className="truncate text-center text-[11px] text-slate-500" title={trainingStatus}>
-                    {trainingStatus.replace(/^=== | ===$/g, "")}
+                {isTrainingLocally && trainingStatusLine && (
+                  <p className="truncate text-center text-[11px] text-slate-500" title={trainingStatusLine}>
+                    {trainingStatusLine.replace(/^=== | ===$/g, "")}
                   </p>
                 )}
                 {!isTrainingLocally && (
